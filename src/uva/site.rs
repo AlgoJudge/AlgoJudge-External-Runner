@@ -175,3 +175,163 @@ mod tests {
         assert_eq!(source_to_send(written), written);
     }
 }
+
+// ---------------------------------------------------------------- over the wire
+
+use std::time::{Duration, Instant};
+
+/// onlinejudge.org, with one session held for the life of the process.
+///
+/// **The mutex is the design, not an implementation detail.** Holding it across
+/// a whole submission gives two properties the specification asks for
+/// separately: submits are serialised — at most one new row on the account can
+/// be ours, which is what makes crash recovery unambiguous — and a lapsed
+/// session is re-established once by whoever noticed, rather than by every
+/// caller at once, each invalidating the others' cookie.
+pub struct Site {
+    http: reqwest::Client,
+    base: String,
+    username: String,
+    password: String,
+    turn: tokio::sync::Mutex<Turn>,
+}
+
+struct Turn {
+    signed_in: bool,
+    last_submit: Option<Instant>,
+}
+
+impl Site {
+    pub fn new(base: String, username: String, password: String) -> anyhow::Result<Self> {
+        Ok(Self {
+            // The cookie jar is the session. It is never written to disk: it is a
+            // bearer credential for a third-party account with the same reach as
+            // the password, and a restart re-establishing one session is not a
+            // cost worth a secret at rest.
+            http: reqwest::Client::builder()
+                .cookie_store(true)
+                .user_agent(concat!(
+                    "AlgoJudge-Runner-UVa/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (+https://algojudge.app)"
+                ))
+                .timeout(Duration::from_secs(60))
+                .build()?,
+            base,
+            username,
+            password,
+            turn: tokio::sync::Mutex::new(Turn {
+                signed_in: false,
+                last_submit: None,
+            }),
+        })
+    }
+
+    /// Establishes the session. **No credential reaches a log line here.**
+    async fn sign_in(&self) -> anyhow::Result<()> {
+        let page = self.http.get(&self.base).send().await?.text().await?;
+        let mut form = hidden_fields(&page)?;
+        form.push(("username".into(), self.username.clone()));
+        form.push(("passwd".into(), self.password.clone()));
+        form.push(("remember".into(), "yes".into()));
+        form.push(("Submit".into(), "Login".into()));
+
+        let answer = self
+            .http
+            .post(format!(
+                "{}index.php?option=com_comprofiler&task=login",
+                self.base
+            ))
+            .header(reqwest::header::REFERER, &self.base)
+            .form(&form)
+            .send()
+            .await?;
+
+        if !answer.status().is_success() {
+            anyhow::bail!("onlinejudge.org answered {} to the sign-in", answer.status());
+        }
+        Ok(())
+    }
+
+    /// Sends one submission and returns the archive's id for it.
+    ///
+    /// Exactly one re-login and one retry. The proof of concept looped fifteen
+    /// times, which turns a wrong password into thirty requests and a plausible
+    /// ban.
+    pub async fn submit(
+        &self,
+        problem_number: i64,
+        language_id: i64,
+        source: &str,
+        min_interval: Duration,
+    ) -> Result<i64, Refused> {
+        let mut turn = self.turn.lock().await;
+
+        if let Some(last) = turn.last_submit {
+            let since = last.elapsed();
+            if since < min_interval {
+                tokio::time::sleep(min_interval - since).await;
+            }
+        }
+
+        for attempt in 0..2 {
+            if !turn.signed_in {
+                self.sign_in()
+                    .await
+                    .map_err(|e| Refused::Site(e.to_string()))?;
+                turn.signed_in = true;
+            }
+
+            let sent = self.send(problem_number, language_id, source).await;
+            turn.last_submit = Some(Instant::now());
+
+            match sent {
+                Ok(Some(sid)) => return Ok(sid),
+                // No id and the first attempt: the likeliest reason is a session
+                // that lapsed, and the redirect does not say so in as many words.
+                Ok(None) if attempt == 0 => {
+                    tracing::warn!("no submission id came back; re-establishing the session once");
+                    turn.signed_in = false;
+                }
+                Ok(None) => return Err(Refused::SessionLapsed),
+                Err(e) => return Err(Refused::Site(e.to_string())),
+            }
+        }
+        Err(Refused::SessionLapsed)
+    }
+
+    async fn send(
+        &self,
+        problem_number: i64,
+        language_id: i64,
+        source: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let answer = self
+            .http
+            .post(format!(
+                "{}index.php?option=com_onlinejudge&Itemid=25&page=save_submission",
+                self.base
+            ))
+            .header(
+                reqwest::header::REFERER,
+                format!(
+                    "{}index.php?option=com_onlinejudge&Itemid=25&page=submit_problem",
+                    self.base
+                ),
+            )
+            .form(&[
+                ("problemid", ""),
+                ("category", ""),
+                ("codeupl", ""),
+                ("localid", &problem_number.to_string()),
+                ("language", &language_id.to_string()),
+                ("code", source_to_send(source)),
+            ])
+            .send()
+            .await?;
+
+        // The id is in the address the redirect chain ended at, which reqwest
+        // has already followed. Confirmed against the live archive 2026-08-16.
+        Ok(sid_from(answer.url().as_str()))
+    }
+}

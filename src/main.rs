@@ -13,6 +13,7 @@
 mod config;
 mod lease;
 mod pending;
+mod problem;
 mod schedule;
 mod uva;
 mod verdict;
