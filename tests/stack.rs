@@ -138,7 +138,6 @@ impl Session {
 /// A `uva@1` problem, attached to an open round, ready to be submitted to.
 pub struct Ready {
     pub activity: String,
-    pub problem_number: i64,
 }
 
 /// Builds one, in the order that matters.
@@ -235,10 +234,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
         .post(&format!("/activities/{activity}/enrolment"), json!({}))
         .await;
 
-    Ready {
-        activity,
-        problem_number,
-    }
+    Ready { activity }
 }
 
 /// Waits for the scheduler to open the round, then submits.
