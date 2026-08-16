@@ -1,0 +1,113 @@
+# AlgoJudge-Runner-UVa
+
+A Runner that does not judge anything. It forwards `uva@1` submissions to
+[onlinejudge.org](https://onlinejudge.org), waits for the archive to decide, and
+reports the archive's verdict back to AlgoJudge.
+
+**The verdict is somebody else's opinion**, and every screen that shows it says
+so. This Runner runs no code, has no sandbox, and measures nothing.
+
+## What makes it different from `AlgoJudge-Runner`
+
+| | `AlgoJudge-Runner` | here |
+|---|---|---|
+| Where work is judged | in a sandbox it starts | on a service it does not run |
+| How long a job is held | seconds to minutes | up to fifteen minutes, waiting |
+| Registers as | `external: false` | **`external: true`** |
+| Trials | measures them | refuses them |
+
+**`external: true` is not a detail.** The Server pairs a problem with a Runner on
+that flag and the problem's own, by equality — so a Runner that forwards and does
+not say so is handed nothing at all, and from a log that is indistinguishable
+from an empty queue. An end-to-end run lost ten minutes to exactly that before
+the field existed in the protocol.
+
+## Building and testing
+
+Rust is not a prerequisite. `./x` runs cargo in a container pinned by digest:
+
+    ./x gate        fmt, clippy -D warnings, release build, the whole suite
+    ./x test        the suite alone
+    ./x run --release
+
+Everything in the suite runs offline. The tests against the archive and uHunt
+drive a recorded stand-in started in process, so **the live archive is never a
+test dependency** — which is why CI needs no services and no secrets.
+
+## Configuration
+
+Every variable is `AJ_`-prefixed, the same convention the Server reads.
+`.env.example` lists them all and gives **no** value to either secret; `.env` is
+git-ignored and is what `./x` passes to the container as a file rather than on a
+command line, because an argument lands in the shell history and the process
+list.
+
+Two numbers are checked against each other at start-up rather than discovered an
+hour later:
+
+- **`AJ_Lease__RequestSeconds` must exceed `AJ_Uva__PendingTimeoutSeconds`.**
+  Otherwise the Server reclaims the job while this Runner is still waiting on the
+  archive, and the next Runner to claim it submits the same solution again.
+- **`AJ_Uva__PollMaxSeconds` must fit four times inside the lease.** A held lease
+  is renewed on the polling cycle, so slowing the polling down to be polite to
+  uHunt slows the renewing down with it — and a lease that expires between two
+  renewals is the same double submission by another route.
+
+## Running it end to end
+
+The whole path, against a throwaway Server. **The last step sends a real
+submission to a real service**, so it needs a robot account and a decision from
+whoever owns it.
+
+1. **A Server.** Bring one up from `AlgoJudge-Server` and turn external judging
+   on — it ships **off**, and while it is off no external work is handed out at
+   all.
+
+2. **A problem.** Fetch the statement through the Server, because the archive
+   sends no `Access-Control-Allow-Origin` and a browser cannot read it:
+
+       POST /files/fetch   {"url": "https://onlinejudge.org/external/1/100.pdf"}
+       POST /problems      {"slug":"UVa-100", "type":"uva@1", "external":true}
+       POST /problems/{id}/versions
+           {"statements":[…], "config":{"uva":{"problemNumber":100},
+                                        "languages":{"cpp":5}}}
+
+   **The language map is not optional.** Without it this Runner refuses the job
+   before anything leaves, saying the configuration cannot be read — which is the
+   right answer, and was found the hard way.
+
+3. **An activity**, a round that has opened, the problem attached, somebody
+   enrolled. **Attach after the configuration is right**: the assignment pins the
+   problem version at the moment it is attached, deliberately, so publishing a
+   correction afterwards does not change what a running round is judged against.
+
+4. **This Runner**, pointed at that stack, then approved in the manager panel:
+
+       AJ_Server__BaseUrl=http://host.docker.internal:8098/api/v1 \
+       AJ_Runner__ProblemTypes=uva@1 RUST_LOG=info ./x run --release
+
+   Both of those are forwarded from the host by `./x`, which is how a Runner is
+   pointed somewhere other than the stack its `.env` names.
+
+5. **Submit**, and watch:
+
+       INFO  handed to onlinejudge.org  job=… sid=31255986
+       INFO  resolved the archive account  uid=…
+
+   The verdict arrives on the polling interval and is reported to the Server as
+   an ordinary result.
+
+**Every real submission stays on the account for ever.** Use a solution written
+to be wrong: it keeps the account's solved count honest, and it avoids the
+question of what a duplicated *accepted* solution does, which nobody has measured.
+
+## Known gaps
+
+- **The long-poll trigger is not built.** The Runner says so at every start.
+  Verdicts arrive on the interval net alone, which is slower but not wrong.
+- **The language table has one entry.** `cpp: 5` is the id seen accepted; the
+  rest of the archive's list has not been read, and guessing it would put numbers
+  in a configuration that nobody has watched work.
+- **The conformance suite has not been run from here.** `AlgoJudge-Runner`'s
+  `CLAUDE.md` calls those cases obligatory for a second implementation, and this
+  is one.
