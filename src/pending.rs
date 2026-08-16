@@ -30,16 +30,9 @@ pub struct Entry {
     pub sent: Instant,
     /// Whether the Server has been told the work is running.
     pub announced: bool,
-}
-
-/// Why an entry left the set.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Left {
-    /// A row matched and carried a final verdict.
-    Answered,
-    /// The archive did not answer in time. **An infrastructure failure**, never a
-    /// verdict: nobody is marked down for the archive being slow.
-    TimedOut,
+    /// Which verdicts count as solved for **this** assignment, carried from the
+    /// configuration chain so a later poll needs no second read of it.
+    pub accepted: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -89,10 +82,6 @@ impl Pending {
         self.entries.iter().map(|(sid, entry)| (*sid, entry))
     }
 
-    pub fn get_mut(&mut self, sid: i64) -> Option<&mut Entry> {
-        self.entries.get_mut(&sid)
-    }
-
     /// What this row is to us.
     pub fn matched(&self, row: &Row) -> Matched<'_> {
         match self.entries.get(&row.sid) {
@@ -132,6 +121,7 @@ mod tests {
             language_id: 1,
             sent,
             announced: false,
+            accepted: vec!["AC".to_owned()],
         }
     }
 

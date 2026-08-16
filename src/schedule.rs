@@ -41,14 +41,6 @@ pub fn interval(
     }
 }
 
-/// Whether a trigger may be acted on yet.
-///
-/// A burst of global events must not become a burst of requests to `subs-user`:
-/// the floor holds whatever woke us.
-pub fn may_fetch(since_last_fetch: Duration, min: Duration) -> bool {
-    since_last_fetch >= min
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,18 +64,22 @@ mod tests {
     /// With it off, the trade between freshness and politeness has to be made.
     #[test]
     fn without_it_the_interval_escalates_once() {
-        assert_eq!(interval(false, Duration::from_secs(0), MIN, MAX, ESCALATE), MIN);
-        assert_eq!(interval(false, Duration::from_secs(119), MIN, MAX, ESCALATE), MIN);
-        assert_eq!(interval(false, Duration::from_secs(120), MIN, MAX, ESCALATE), MAX);
-        assert_eq!(interval(false, Duration::from_secs(600), MIN, MAX, ESCALATE), MAX);
-    }
-
-    /// Whatever wakes us, the floor is the floor.
-    #[test]
-    fn a_burst_of_triggers_does_not_become_a_burst_of_requests() {
-        assert!(!may_fetch(Duration::from_secs(0), MIN));
-        assert!(!may_fetch(Duration::from_secs(19), MIN));
-        assert!(may_fetch(Duration::from_secs(20), MIN));
+        assert_eq!(
+            interval(false, Duration::from_secs(0), MIN, MAX, ESCALATE),
+            MIN
+        );
+        assert_eq!(
+            interval(false, Duration::from_secs(119), MIN, MAX, ESCALATE),
+            MIN
+        );
+        assert_eq!(
+            interval(false, Duration::from_secs(120), MIN, MAX, ESCALATE),
+            MAX
+        );
+        assert_eq!(
+            interval(false, Duration::from_secs(600), MIN, MAX, ESCALATE),
+            MAX
+        );
     }
 
     /// The net never falls below the floor either, whatever it is configured to.

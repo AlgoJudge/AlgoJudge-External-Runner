@@ -229,17 +229,24 @@ mod tests {
         let mut config = base();
         config.lease_seconds = 600;
         let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
-        assert!(refused.contains("submit the same solution again"), "{refused}");
+        assert!(
+            refused.contains("submit the same solution again"),
+            "{refused}"
+        );
     }
 
     #[test]
     fn the_defaults_are_accepted() {
-        base().refuse_what_cannot_work().expect("the defaults must be usable");
+        base()
+            .refuse_what_cannot_work()
+            .expect("the defaults must be usable");
     }
 
     #[test]
     fn a_malformed_number_names_the_key_and_the_value() {
-        let refused = number_in("3O", "Uva__PollMinSeconds").unwrap_err().to_string();
+        let refused = number_in("3O", "Uva__PollMinSeconds")
+            .unwrap_err()
+            .to_string();
         assert!(refused.contains("AJ_Uva__PollMinSeconds"), "{refused}");
         assert!(refused.contains("3O"), "{refused}");
     }

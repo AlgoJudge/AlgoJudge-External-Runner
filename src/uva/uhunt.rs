@@ -89,6 +89,63 @@ pub struct Problem {
     pub rtl: i64,
 }
 
+// ---------------------------------------------------------------- over the wire
+
+/// Reading uHunt over HTTP.
+///
+/// Every call here is a plain public read. The base URL is a field rather than a
+/// constant so a test can point it at a recorded stand-in without the production
+/// code knowing it is talking to one.
+pub struct Uhunt {
+    http: reqwest::Client,
+    base: String,
+}
+
+impl Uhunt {
+    pub fn new(http: reqwest::Client, base: String) -> Self {
+        Self { http, base }
+    }
+
+    async fn text(&self, path: &str) -> anyhow::Result<String> {
+        let answer = self
+            .http
+            .get(format!("{}api/{path}", self.base))
+            .send()
+            .await?;
+        let status = answer.status();
+        let body = answer.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("uHunt answered {status} for {path}");
+        }
+        Ok(body)
+    }
+
+    /// The account's numeric id, resolved once at start-up.
+    pub async fn user_id(&self, username: &str) -> anyhow::Result<u64> {
+        let body = self.text(&format!("uname2uid/{username}")).await?;
+        body.trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("uHunt does not know the account {username:?}"))
+    }
+
+    /// One problem by its public number — the number a person types.
+    pub async fn problem(&self, number: i64) -> anyhow::Result<Problem> {
+        let body = self.text(&format!("p/num/{number}")).await?;
+        serde_json::from_str(&body)
+            .map_err(|_| anyhow::anyhow!("onlinejudge.org has no problem {number}"))
+    }
+
+    /// Everything the account has submitted since `after`.
+    ///
+    /// The window is anchored to the **oldest** outstanding submission, so it
+    /// grows with how long that one has been waiting rather than with how many
+    /// are waiting. Rows that are not ours come back too; they are dropped by
+    /// the caller, silently, because the account is shared.
+    pub async fn since(&self, uid: u64, after: i64) -> anyhow::Result<Vec<Row>> {
+        rows(&self.text(&format!("subs-user/{uid}/{after}")).await?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,58 +217,5 @@ mod tests {
         assert_eq!(problem.title, "The 3n + 1 problem");
         assert_eq!(problem.status, 1);
         assert_eq!(problem.rtl, 3000);
-    }
-}
-
-// ---------------------------------------------------------------- over the wire
-
-/// Reading uHunt over HTTP.
-///
-/// Every call here is a plain public read. The base URL is a field rather than a
-/// constant so a test can point it at a recorded stand-in without the production
-/// code knowing it is talking to one.
-pub struct Uhunt {
-    http: reqwest::Client,
-    base: String,
-}
-
-impl Uhunt {
-    pub fn new(http: reqwest::Client, base: String) -> Self {
-        Self { http, base }
-    }
-
-    async fn text(&self, path: &str) -> anyhow::Result<String> {
-        let answer = self.http.get(format!("{}api/{path}", self.base)).send().await?;
-        let status = answer.status();
-        let body = answer.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("uHunt answered {status} for {path}");
-        }
-        Ok(body)
-    }
-
-    /// The account's numeric id, resolved once at start-up.
-    pub async fn user_id(&self, username: &str) -> anyhow::Result<u64> {
-        let body = self.text(&format!("uname2uid/{username}")).await?;
-        body.trim()
-            .parse()
-            .map_err(|_| anyhow::anyhow!("uHunt does not know the account {username:?}"))
-    }
-
-    /// One problem by its public number — the number a person types.
-    pub async fn problem(&self, number: i64) -> anyhow::Result<Problem> {
-        let body = self.text(&format!("p/num/{number}")).await?;
-        serde_json::from_str(&body)
-            .map_err(|_| anyhow::anyhow!("onlinejudge.org has no problem {number}"))
-    }
-
-    /// Everything the account has submitted since `after`.
-    ///
-    /// The window is anchored to the **oldest** outstanding submission, so it
-    /// grows with how long that one has been waiting rather than with how many
-    /// are waiting. Rows that are not ours come back too; they are dropped by
-    /// the caller, silently, because the account is shared.
-    pub async fn since(&self, uid: u64, after: i64) -> anyhow::Result<Vec<Row>> {
-        rows(&self.text(&format!("subs-user/{uid}/{after}")).await?)
     }
 }

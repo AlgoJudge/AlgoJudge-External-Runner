@@ -80,7 +80,9 @@ const fn judged(verdict: &'static str, abbreviation: &'static str) -> Outcome {
 /// wrote down rather than from a judgement we invented about somebody else's
 /// verdict.
 pub fn solved(abbreviation: &str, accepted: &[String]) -> bool {
-    accepted.iter().any(|a| a.eq_ignore_ascii_case(abbreviation))
+    accepted
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(abbreviation))
 }
 
 #[cfg(test)]

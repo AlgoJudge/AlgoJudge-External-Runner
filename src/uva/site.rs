@@ -113,69 +113,6 @@ pub fn source_to_send(written: &str) -> &str {
     written
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The shape of the real page, reduced to what is read from it.
-    const LOGIN_PAGE: &str = r#"
-        <html><body>
-          <form action="/index.php" id="other_form"><input type="hidden" name="decoy" value="no"></form>
-          <form action="/index.php?option=com_comprofiler&task=login" id="mod_loginform" method="post">
-            <input type="text" name="username" size="18">
-            <input type="password" name="passwd" size="18">
-            <input type="hidden" name="option" value="com_comprofiler">
-            <input type="hidden" name="remember" value="yes">
-            <input type="hidden" name="7f1b1a2c3d4e5f60718293a4b5c6d7e8" value="1">
-          </form>
-        </body></html>"#;
-
-    #[test]
-    fn the_form_is_found_by_its_id_not_by_its_position() {
-        let fields = hidden_fields(LOGIN_PAGE).unwrap();
-        let names: Vec<_> = fields.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"option"), "{names:?}");
-        assert!(names.contains(&"7f1b1a2c3d4e5f60718293a4b5c6d7e8"), "{names:?}");
-        // The decoy sits in an earlier form, which is exactly what a positional
-        // reader would have taken.
-        assert!(!names.contains(&"decoy"), "a field from another form was read");
-    }
-
-    #[test]
-    fn a_page_without_the_form_says_the_layout_changed() {
-        let refused = hidden_fields("<html><body>signed out</body></html>")
-            .unwrap_err()
-            .to_string();
-        assert!(refused.contains("layout changed"), "{refused}");
-    }
-
-    /// The real redirect, captured on 2026-08-16.
-    #[test]
-    fn the_id_comes_out_of_the_redirect() {
-        let encoded = "https://onlinejudge.org/index.php?option=com_onlinejudge&Itemid=25\
-                       &page=submit_problem&category=&mosmsg=Submission+received+with+ID+31254724";
-        assert_eq!(sid_from(encoded), Some(31254724));
-
-        let decoded = "https://onlinejudge.org/index.php?…&mosmsg=Submission received with ID 31254726";
-        assert_eq!(sid_from(decoded), Some(31254726));
-    }
-
-    /// While a submission is queued the id is simply absent, which is the
-    /// ordinary case and not a parse failure.
-    #[test]
-    fn no_id_is_none_rather_than_a_panic() {
-        assert_eq!(sid_from("https://onlinejudge.org/"), None);
-        assert_eq!(sid_from("mosmsg=Submission+received+with+ID+"), None);
-    }
-
-    /// The measurement above, pinned: nothing is added to somebody's source.
-    #[test]
-    fn the_source_travels_exactly_as_written() {
-        let written = "#include <stdio.h>\nint main(void){return 0;}\n";
-        assert_eq!(source_to_send(written), written);
-    }
-}
-
 // ---------------------------------------------------------------- over the wire
 
 use std::time::{Duration, Instant};
@@ -248,7 +185,10 @@ impl Site {
             .await?;
 
         if !answer.status().is_success() {
-            anyhow::bail!("onlinejudge.org answered {} to the sign-in", answer.status());
+            anyhow::bail!(
+                "onlinejudge.org answered {} to the sign-in",
+                answer.status()
+            );
         }
         Ok(())
     }
@@ -333,5 +273,75 @@ impl Site {
         // The id is in the address the redirect chain ended at, which reqwest
         // has already followed. Confirmed against the live archive 2026-08-16.
         Ok(sid_from(answer.url().as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape of the real page, reduced to what is read from it.
+    const LOGIN_PAGE: &str = r#"
+        <html><body>
+          <form action="/index.php" id="other_form"><input type="hidden" name="decoy" value="no"></form>
+          <form action="/index.php?option=com_comprofiler&task=login" id="mod_loginform" method="post">
+            <input type="text" name="username" size="18">
+            <input type="password" name="passwd" size="18">
+            <input type="hidden" name="option" value="com_comprofiler">
+            <input type="hidden" name="remember" value="yes">
+            <input type="hidden" name="7f1b1a2c3d4e5f60718293a4b5c6d7e8" value="1">
+          </form>
+        </body></html>"#;
+
+    #[test]
+    fn the_form_is_found_by_its_id_not_by_its_position() {
+        let fields = hidden_fields(LOGIN_PAGE).unwrap();
+        let names: Vec<_> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"option"), "{names:?}");
+        assert!(
+            names.contains(&"7f1b1a2c3d4e5f60718293a4b5c6d7e8"),
+            "{names:?}"
+        );
+        // The decoy sits in an earlier form, which is exactly what a positional
+        // reader would have taken.
+        assert!(
+            !names.contains(&"decoy"),
+            "a field from another form was read"
+        );
+    }
+
+    #[test]
+    fn a_page_without_the_form_says_the_layout_changed() {
+        let refused = hidden_fields("<html><body>signed out</body></html>")
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("layout changed"), "{refused}");
+    }
+
+    /// The real redirect, captured on 2026-08-16.
+    #[test]
+    fn the_id_comes_out_of_the_redirect() {
+        let encoded = "https://onlinejudge.org/index.php?option=com_onlinejudge&Itemid=25\
+                       &page=submit_problem&category=&mosmsg=Submission+received+with+ID+31254724";
+        assert_eq!(sid_from(encoded), Some(31254724));
+
+        let decoded =
+            "https://onlinejudge.org/index.php?…&mosmsg=Submission received with ID 31254726";
+        assert_eq!(sid_from(decoded), Some(31254726));
+    }
+
+    /// While a submission is queued the id is simply absent, which is the
+    /// ordinary case and not a parse failure.
+    #[test]
+    fn no_id_is_none_rather_than_a_panic() {
+        assert_eq!(sid_from("https://onlinejudge.org/"), None);
+        assert_eq!(sid_from("mosmsg=Submission+received+with+ID+"), None);
+    }
+
+    /// The measurement above, pinned: nothing is added to somebody's source.
+    #[test]
+    fn the_source_travels_exactly_as_written() {
+        let written = "#include <stdio.h>\nint main(void){return 0;}\n";
+        assert_eq!(source_to_send(written), written);
     }
 }

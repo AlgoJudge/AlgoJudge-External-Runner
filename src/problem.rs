@@ -172,7 +172,8 @@ mod tests {
         let refused = read(no_languages.as_ref()).unwrap_err().to_string();
         assert!(refused.contains("no languages"), "{refused}");
 
-        let wrong_format = document(r#"{"format":"standard-io","uva":{"problemNumber":100},"languages":{"c":1}}"#);
+        let wrong_format =
+            document(r#"{"format":"standard-io","uva":{"problemNumber":100},"languages":{"c":1}}"#);
         let refused = read(wrong_format.as_ref()).unwrap_err().to_string();
         assert!(refused.contains("not \"uva\""), "{refused}");
     }
