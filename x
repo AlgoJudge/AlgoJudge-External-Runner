@@ -122,6 +122,8 @@ run() {
         -w /work \
         -e CARGO_HOME=/cargo \
         -e CARGO_TERM_COLOR=always \
+        -e AJ_Server__BaseUrl \
+        -e AJ_Runner__ProblemTypes \
         -e AJ_TEST_SERVER \
         -e AJ_ADMIN_TOKEN \
         -e AJ_SANDBOX_ALLOW_CGROUP_V1 \
