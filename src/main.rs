@@ -11,6 +11,8 @@
 //! irrelevant to a component that is an HTTP client with a timer.
 
 mod config;
+mod pending;
+mod schedule;
 mod uva;
 mod verdict;
 
