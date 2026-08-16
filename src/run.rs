@@ -73,7 +73,14 @@ pub struct Runner {
     pub site: Site,
     pub uhunt: Uhunt,
     pub config: Config,
-    pub uid: u64,
+    /// Resolved on first need, not at start-up.
+    ///
+    /// **A Runner that starts while the archive is down must still register and
+    /// wait** — the specification says so, and resolving this eagerly made an
+    /// unreachable uHunt into a Runner that never appeared in the manager panel
+    /// at all. It is needed to poll, and polling only happens once something has
+    /// been submitted.
+    uid: Option<u64>,
     pending: Pending,
     /// Public number to uHunt's internal id. Ours to re-derive, not to depend on.
     numbers: std::collections::BTreeMap<i64, i64>,
@@ -88,7 +95,7 @@ impl Runner {
         site: Site,
         uhunt: Uhunt,
         config: Config,
-        uid: u64,
+        uid: Option<u64>,
     ) -> Self {
         Self {
             server,
@@ -254,12 +261,35 @@ impl Runner {
         ))
     }
 
+    /// The account's numeric id, resolved the first time it is wanted.
+    async fn account(&mut self) -> Option<u64> {
+        if let Some(uid) = self.uid {
+            return Some(uid);
+        }
+        match self.uhunt.user_id(&self.config.uva_username).await {
+            Ok(uid) => {
+                tracing::info!(uid, "resolved the archive account");
+                self.uid = Some(uid);
+                Some(uid)
+            }
+            // Not reaching uHunt says nothing about anybody's solution, and the
+            // next cycle asks again.
+            Err(e) => {
+                tracing::warn!(%e, "could not resolve the archive account");
+                None
+            }
+        }
+    }
+
     /// One request, however many submissions are outstanding.
     async fn harvest(&mut self) {
         let Some(after) = uhunt::cursor(self.pending.sids()) else {
             return;
         };
-        let rows = match self.uhunt.since(self.uid, after).await {
+        let Some(uid) = self.account().await else {
+            return;
+        };
+        let rows = match self.uhunt.since(uid, after).await {
             Ok(rows) => rows,
             // Not reaching the archive says nothing about anybody's solution.
             Err(e) => {
