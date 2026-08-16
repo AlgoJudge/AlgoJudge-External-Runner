@@ -1,0 +1,39 @@
+[package]
+name = "algojudge-runner-uva"
+description = "A Runner that forwards uva@1 submissions to onlinejudge.org and reports the archive's verdict."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/AlgoJudge/AlgoJudge-Runner-UVa"
+
+[dependencies]
+# The Server–Runner contract, pinned by revision. `AlgoJudge-Runner` publishes no
+# tags, so a revision is the only stable name; and the contract is `Accepted`
+# (v1.1, 2026-08-08) while only one implementation is released, which is why the
+# crate stays where it is rather than being extracted.
+aj-protocol = { git = "https://github.com/AlgoJudge/AlgoJudge-Runner", rev = "1123891297ec00708e96cbdf7aee686095872169" }
+
+anyhow = "1.0"
+# `cookies` is the one feature this Runner needs that the sandboxing Runner does
+# not: onlinejudge.org is an HTML form flow behind a session cookie, not an API.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "cookies",
+    "rustls-tls",
+] }
+# A real parser for the login form. The proof of concept split the response on
+# `"<form"` and took element three, which breaks on any layout change; the form
+# is found by its id instead.
+scraper = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# A recorded stand-in for onlinejudge.org and uHunt. The live archive is never a
+# test dependency: it is somebody else's infrastructure and it is not ours to
+# hammer on every commit.
+wiremock = "0.6"

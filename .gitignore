@@ -1,0 +1,12 @@
+# Build output lives in a named Docker volume, not here — see `./x`. This entry
+# is for anyone who runs cargo directly on a host that has it.
+/target/
+
+# A Runner is its key. There is no rotation in the contract, so a leaked one is
+# a Runner that has to be revoked and registered again.
+*.key
+*.key.partial
+
+# Compose reads this for variable substitution. It holds the UVa account.
+# Never committed.
+.env
