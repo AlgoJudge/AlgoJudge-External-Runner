@@ -32,6 +32,11 @@ pub async fn admitted(server: &Server, identity: &Identity, config: &Config) -> 
                 version: env!("CARGO_PKG_VERSION").into(),
                 public_key: identity.public_key(),
                 problem_types: config.problem_types.clone(),
+                // **The whole point of this Runner, declared.** Every submission
+                // it takes leaves the installation, and the Server pairs work with
+                // workers on this: without it a `uva@1` problem is never handed
+                // over, and the queue simply looks empty.
+                external: true,
                 machine: None,
             })
             .await;
