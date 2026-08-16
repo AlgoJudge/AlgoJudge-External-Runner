@@ -101,9 +101,21 @@ else
     CGROUP=''
 fi
 
+# This Runner's whole configuration is `AJ_*`, and two of those are the
+# credentials of a third-party account. A file rather than `-e` on the command
+# line: an argument lands in the shell history and in the process list, and a
+# credential that does either has effectively been published.
+#
+# `.env` is git-ignored. `.env.example` beside it lists every variable and gives
+# **no** value to either secret.
+ENV_FILE=''
+if [ -f .env ]; then
+    ENV_FILE='--env-file .env'
+fi
+
 run() {
     # shellcheck disable=SC2086
-    docker run --rm $TTY $NETWORK $SOCKET $CGROUP \
+    docker run --rm $TTY $NETWORK $SOCKET $CGROUP $ENV_FILE \
         -v "$HOST_DIR:/work" \
         -v "$CARGO_VOLUME:/cargo" \
         -v "$TARGET_VOLUME:/work/target" \

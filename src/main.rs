@@ -37,14 +37,7 @@ async fn main() -> anyhow::Result<()> {
         config.uva_password.clone(),
     )?;
 
-    // Resolved once. A name the archive does not know is a configuration
-    // mistake, and it is cheaper to learn it now than on the first submission.
-    let uid = match config.uva_user_id {
-        Some(uid) => uid,
-        None => uhunt.user_id(&config.uva_username).await?,
-    };
-
-    tracing::info!(name = %config.runner_name, types = ?config.problem_types, uid, "registered as");
+    tracing::info!(name = %config.runner_name, types = ?config.problem_types, "starting");
     if config.long_poll_enabled {
         // Said out loud rather than left to be inferred from latency: the flag
         // is accepted, the accelerator behind it is not built, and the interval
@@ -54,7 +47,10 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Nothing touches onlinejudge.org before this point: a Runner that starts
+    // while the archive is down still registers and waits.
+    let uva_user_id = config.uva_user_id;
     run::admitted(&server, &identity, &config).await?;
-    let mut runner = run::Runner::new(server, cache, site, uhunt, config, uid);
+    let mut runner = run::Runner::new(server, cache, site, uhunt, config, uva_user_id);
     runner.work(&identity).await
 }
