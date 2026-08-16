@@ -14,6 +14,7 @@ pub mod config;
 pub mod lease;
 pub mod pending;
 pub mod problem;
+pub mod report;
 pub mod run;
 pub mod schedule;
 pub mod uva;

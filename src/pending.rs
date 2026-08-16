@@ -33,6 +33,12 @@ pub struct Entry {
     /// Which verdicts count as solved for **this** assignment, carried from the
     /// configuration chain so a later poll needs no second read of it.
     pub accepted: Vec<String>,
+    /// What happened to this submission, in the order it happened.
+    ///
+    /// Appended to rather than summarised: when the verdict comes from somebody
+    /// else's judge, the rows themselves are the only answer to a dispute about
+    /// what that judge said.
+    pub trail: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +88,14 @@ impl Pending {
         self.entries.iter().map(|(sid, entry)| (*sid, entry))
     }
 
+    /// One entry, to append to its trail as the archive says more about it.
+    ///
+    /// Removed once as having no caller, and back because it has one: the
+    /// evidence log is built while the rows arrive, not reconstructed after.
+    pub fn get_mut(&mut self, sid: i64) -> Option<&mut Entry> {
+        self.entries.get_mut(&sid)
+    }
+
     /// What this row is to us.
     pub fn matched(&self, row: &Row) -> Matched<'_> {
         match self.entries.get(&row.sid) {
@@ -122,6 +136,7 @@ mod tests {
             sent,
             announced: false,
             accepted: vec!["AC".to_owned()],
+            trail: Vec::new(),
         }
     }
 

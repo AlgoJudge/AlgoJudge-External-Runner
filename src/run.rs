@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aj_protocol::wire::{ClaimedJob, Register, ReportResult};
+use aj_protocol::wire::{AttachToJob, ClaimedJob, Register, ReportResult};
 use aj_protocol::{Backoff, Cache, Identity, Server};
 
 use crate::config::Config;
@@ -246,6 +246,10 @@ impl Runner {
                 sent: Instant::now(),
                 announced: true,
                 accepted: setup.accepted,
+                trail: vec![
+                    format!("submitted problem {} as language {language}", setup.number),
+                    format!("sid: {sid}"),
+                ],
             },
         ))
     }
@@ -264,7 +268,7 @@ impl Runner {
             }
         };
 
-        let mut done: Vec<(i64, ReportResult)> = Vec::new();
+        let mut done: Vec<(i64, Option<serde_json::Value>, ReportResult)> = Vec::new();
         for row in &rows {
             let entry = match self.pending.matched(row) {
                 Matched::Stranger => continue,
@@ -281,6 +285,18 @@ impl Runner {
                 Matched::Ours(entry) => entry.clone(),
             };
 
+            if let Some(held) = self.pending.get_mut(row.sid) {
+                held.trail.push(format!(
+                    "row: [{},{},{},{},{},{}]",
+                    row.sid,
+                    row.pid,
+                    row.verdict_id,
+                    row.runtime_ms,
+                    row.submitted_at,
+                    row.language_id
+                ));
+            }
+
             match verdict::of(row.verdict_id) {
                 Outcome::Pending => {}
                 Outcome::Judged {
@@ -288,8 +304,11 @@ impl Runner {
                     abbreviation,
                 } => {
                     let solved = verdict::solved(abbreviation, &entry.accepted);
+                    let document =
+                        crate::report::details(&entry, row, verdict, abbreviation, solved);
                     done.push((
                         row.sid,
+                        Some(document),
                         ReportResult::judged(
                             &entry.lease_token,
                             if solved { 1.0 } else { 0.0 },
@@ -305,15 +324,21 @@ impl Runner {
                             "{reason}; this will not be retried"
                         );
                     }
-                    done.push((row.sid, ReportResult::failed(&entry.lease_token, reason)));
+                    let document = crate::report::details_of_failure(&entry, row.sid, reason);
+                    done.push((
+                        row.sid,
+                        Some(document),
+                        ReportResult::failed(&entry.lease_token, reason),
+                    ));
                 }
             }
         }
 
-        for (sid, report) in done {
+        for (sid, document, report) in done {
             let Some(entry) = self.pending.take(sid) else {
                 continue;
             };
+            self.attach(&entry, document).await;
             self.send(&entry.job_id, &report).await;
         }
     }
@@ -329,6 +354,8 @@ impl Runner {
                 "onlinejudge.org did not judge submission {sid} within {} seconds",
                 self.config.pending_timeout
             );
+            let document = crate::report::details_of_failure(&entry, sid, &why);
+            self.attach(&entry, Some(document)).await;
             self.fail(&entry.job_id, &entry.lease_token, &why).await;
         }
     }
@@ -371,6 +398,66 @@ impl Runner {
                     tracing::error!(job = %job_id, "the Server has been unreachable too long");
                     self.pending.take(sid);
                 }
+            }
+        }
+    }
+
+    /// The two artefacts, **before** the report.
+    ///
+    /// The order is not a preference: the Server accepts an attachment only
+    /// while the job is `Running`, and reporting ends that. Get it the wrong way
+    /// round and the log explaining a failure is the thing that goes missing.
+    ///
+    /// A lost attachment is a warning, never a failure: an answer without its
+    /// evidence is worth more than no answer at all.
+    async fn attach(&self, entry: &Entry, document: Option<serde_json::Value>) {
+        let mut carried: Vec<(&str, &str, Vec<u8>)> = Vec::new();
+        if !entry.trail.is_empty() {
+            carried.push((
+                "log",
+                "text/plain",
+                entry
+                    .trail
+                    .join(
+                        "
+",
+                    )
+                    .into_bytes(),
+            ));
+        }
+        if let Some(document) = &document {
+            match serde_json::to_vec_pretty(document) {
+                Ok(bytes) => carried.push(("details", "application/json", bytes)),
+                Err(e) => tracing::warn!(%e, "the result document could not be written"),
+            }
+        }
+
+        for (name, mime, bytes) in carried {
+            let file_name = if name == "details" {
+                "details.json"
+            } else {
+                "log.txt"
+            };
+            let uploaded = match self.server.upload(file_name, mime, bytes).await {
+                Ok(uploaded) => uploaded,
+                Err(e) => {
+                    tracing::warn!(name, %e, "an attachment could not be uploaded");
+                    continue;
+                }
+            };
+            if let Err(e) = self
+                .server
+                .attach_to_job(
+                    &entry.job_id,
+                    &AttachToJob {
+                        lease_token: entry.lease_token.clone(),
+                        file_id: uploaded.id,
+                        name: name.to_owned(),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(name, %e, "an attachment could not be named on the attempt");
             }
         }
     }
