@@ -11,6 +11,7 @@
 //! irrelevant to a component that is an HTTP client with a timer.
 
 mod config;
+mod uva;
 mod verdict;
 
 fn main() -> anyhow::Result<()> {
