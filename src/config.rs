@@ -127,6 +127,31 @@ impl Config {
                 self.pending_timeout
             );
         }
+        // **Renewal rides on this cadence.** A held lease is renewed at the top
+        // of the same cycle that asks the archive, so the slowest poll interval
+        // is also the slowest renewal. An operator being polite to uHunt by
+        // raising this — the obvious, well-meant change — stretches the renewal
+        // interval with it, and a lease that expires between two renewals is
+        // reclaimed, claimed by another Runner, and **the same solution goes to
+        // onlinejudge.org a second time**. That is the failure this Runner's
+        // lease handling exists to prevent, reachable through configuration
+        // alone, with nothing in any log to say it happened.
+        //
+        // Four, matching the keeper in `AlgoJudge-Runner`: three renewals fit
+        // inside every lease, so two may fail in a row with the deadline still
+        // comfortably ahead.
+        if self.poll_max.saturating_mul(4) > u64::from(self.lease_seconds) {
+            bail!(
+                "AJ_Uva__PollMaxSeconds is {}, which does not fit four times inside \
+                 AJ_Lease__RequestSeconds of {}. A lease is renewed on the polling \
+                 cycle, so this one could expire between two renewals — and the next \
+                 Runner to claim the job would submit the same solution again. \
+                 Lower the poll interval, or raise the lease (the Server clamps it \
+                 at 3600, so this cannot exceed 900).",
+                self.poll_max,
+                self.lease_seconds
+            );
+        }
         if self.max_pending == 0 {
             bail!("AJ_Uva__MaxPending is 0, so no job could ever be claimed");
         }
@@ -229,6 +254,29 @@ mod tests {
         let mut config = base();
         config.lease_seconds = 600;
         let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
+        assert!(
+            refused.contains("submit the same solution again"),
+            "{refused}"
+        );
+    }
+
+    /// **The well-meant change that would have cost a double submission.**
+    ///
+    /// Renewal happens on the polling cycle, so an operator slowing the polling
+    /// down to be kind to uHunt slows the renewing down with it. At three
+    /// hundred seconds against a twenty-minute lease there is still room; at six
+    /// hundred there is not, and nothing about the failure would point here.
+    #[test]
+    fn a_poll_interval_that_does_not_fit_inside_the_lease_is_refused() {
+        let mut config = base();
+        config.poll_max = 300;
+        config
+            .refuse_what_cannot_work()
+            .expect("four times three hundred fits inside twenty minutes");
+
+        config.poll_max = 600;
+        let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
+        assert!(refused.contains("PollMaxSeconds"), "{refused}");
         assert!(
             refused.contains("submit the same solution again"),
             "{refused}"
