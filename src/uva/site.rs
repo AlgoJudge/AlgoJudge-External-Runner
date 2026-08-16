@@ -214,30 +214,45 @@ impl Site {
             }
         }
 
-        for attempt in 0..2 {
-            if !turn.signed_in {
-                self.sign_in()
-                    .await
-                    .map_err(|e| Refused::Site(e.to_string()))?;
-                turn.signed_in = true;
-            }
-
-            let sent = self.send(problem_number, language_id, source).await;
-            turn.last_submit = Some(Instant::now());
-
-            match sent {
-                Ok(Some(sid)) => return Ok(sid),
-                // No id and the first attempt: the likeliest reason is a session
-                // that lapsed, and the redirect does not say so in as many words.
-                Ok(None) if attempt == 0 => {
-                    tracing::warn!("no submission id came back; re-establishing the session once");
-                    turn.signed_in = false;
-                }
-                Ok(None) => return Err(Refused::SessionLapsed),
-                Err(e) => return Err(Refused::Site(e.to_string())),
-            }
+        // **Twice, written twice.** This was a loop with a bound of two and a
+        // guard inside it that returned on the second pass — so the bound
+        // enforced nothing, and a sabotage that raised it to fifteen changed no
+        // behaviour and reddened no test. Straight-line, the rule is where a
+        // reader looks for it and a third attempt cannot be added by accident.
+        if let Some(sid) = self
+            .attempt(&mut turn, problem_number, language_id, source)
+            .await?
+        {
+            return Ok(sid);
         }
-        Err(Refused::SessionLapsed)
+
+        tracing::warn!("no submission id came back; re-establishing the session once");
+        turn.signed_in = false;
+        self.attempt(&mut turn, problem_number, language_id, source)
+            .await?
+            .ok_or(Refused::SessionLapsed)
+    }
+
+    /// One sign-in if needed, and one submission.
+    async fn attempt(
+        &self,
+        turn: &mut Turn,
+        problem_number: i64,
+        language_id: i64,
+        source: &str,
+    ) -> Result<Option<i64>, Refused> {
+        if !turn.signed_in {
+            self.sign_in()
+                .await
+                .map_err(|e| Refused::Site(e.to_string()))?;
+            turn.signed_in = true;
+        }
+        let sent = self
+            .send(problem_number, language_id, source)
+            .await
+            .map_err(|e| Refused::Site(e.to_string()))?;
+        turn.last_submit = Some(Instant::now());
+        Ok(sent)
     }
 
     async fn send(

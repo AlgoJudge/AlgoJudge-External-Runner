@@ -1,23 +1,6 @@
-//! A Runner that judges nothing.
-//!
-//! It claims `uva@1` jobs through the ordinary Server–Runner contract, forwards
-//! the source to `onlinejudge.org` under one account, waits for that archive's
-//! verdict, and reports it back as an ordinary result. **The Server learns
-//! nothing new**: it hands out a job whose problem type it never parses and
-//! stores a verdict string it never reads.
-//!
-//! Nothing untrusted runs here, so there is no sandbox, no container runtime and
-//! no cgroup preflight — the whole of `AlgoJudge-Runner`'s startup check is
-//! irrelevant to a component that is an HTTP client with a timer.
+//! The binary: read the environment, greet both hosts, and hand over to the loop.
 
-mod config;
-mod lease;
-mod pending;
-mod problem;
-mod run;
-mod schedule;
-mod uva;
-mod verdict;
+use algojudge_runner_uva::{config, run, uva};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
