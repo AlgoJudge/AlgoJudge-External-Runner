@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # The same compiler `./x` uses, pinned by digest rather than by tag so that
+    # CI and a developer's machine cannot drift onto two versions without either
+    # of them being told. Copied from `AlgoJudge-Runner`, deliberately: two
+    # Runners compiled against two compilers is a difference nobody would look
+    # for when one of them misbehaves.
+    container:
+      image: rust@sha256:3b2879047d42784ca9403ad20c51ed3df361a50f1df96f5777d39b4e33aa65cd
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      # `rust:slim` installs the minimal profile, which has neither.
+      - name: Add the components the gate needs
+        run: rustup component add rustfmt clippy
+
+      # `aj-protocol` is a git dependency pinned to a revision, and the
+      # repository holding it is public — so this needs no credential, and must
+      # not be given one.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      # Everything here runs offline. The tests against `onlinejudge.org` and
+      # uHunt drive a recorded stand-in started in-process; the live archive is
+      # never a test dependency, which is the whole reason this job needs no
+      # services and no secrets.
+      - name: Test
+        run: cargo test --workspace
