@@ -108,6 +108,28 @@ question of what a duplicated *accepted* solution does, which nobody has measure
 - **The language table has one entry.** `cpp: 5` is the id seen accepted; the
   rest of the archive's list has not been read, and guessing it would put numbers
   in a configuration that nobody has watched work.
-- **The conformance suite has not been run from here.** `AlgoJudge-Runner`'s
-  `CLAUDE.md` calls those cases obligatory for a second implementation, and this
-  is one.
+- **Nothing here covers this Runner's own loop against a live Server.**
+
+  The conformance cases are often described as owed by this repository, and on
+  inspection that is imprecise. Those cases exercise **an implementation of the
+  contract**, and this Runner does not have one: it reaches the Server only
+  through `aj-protocol`, the same crate `AlgoJudge-Runner` uses, whose suite
+  already drives that code against a live Server. Porting them here would test
+  the same lines twice.
+
+  What is genuinely uncovered is what this Runner does *around* that client, and
+  none of it can be reached from `aj-protocol`'s suite:
+
+  - **lease renewal actually firing** — it runs on the polling cycle, so a job
+    held while the archive thinks is renewed by a path nobody has watched;
+  - **a lost lease dropping the job silently** — reporting against a stale lease
+    would overwrite whoever holds it now, and the Server's idempotency would not
+    help, because it keys on the token this Runner no longer has;
+  - **an archive that is unreachable reported as infrastructure rather than as a
+    wrong answer** — the distinction the whole module rests on;
+  - **serialised submission**, which is a correctness requirement here rather
+    than politeness: two in flight at once cannot be told apart on the way back.
+
+  All four need a harness that signs in to a Server, publishes a problem and
+  submits to it. This repository has no such harness, and that — not the
+  conformance cases — is the thing standing in the way.
