@@ -69,15 +69,19 @@ whoever owns it.
        POST /files/fetch   {"url": "https://onlinejudge.org/external/1/100.pdf"}
        POST /problems      {"slug":"UVa-100", "type":"uva@1", "external":true}
        POST /problems/{id}/versions
-           {"statements":[…], "config":{"uva":{"problemNumber":100},
-                                        "languages":{"cpp11-gcc":5}}}
+           {"statements":[…], "props":{"type":"uva@1","uva":{"problemNumber":100}}}
 
-   **The language map is not optional.** Without it this Runner refuses the job
-   before anything leaves, saying the configuration cannot be read — which is the
-   right answer, and was found the hard way.
+   **`props` on the version, not `config`** (2026-08-22). It says *which problem
+   this is*, which is a fact about the problem rather than about one activity's
+   use of it — so it is written once at import and every assignment inherits it,
+   instead of the same number being copied wherever the problem is attached.
 
-   The **names** are AlgoJudge's and the **numbers** are the archive's; see the
-   table below for both.
+   **Without it this Runner refuses the job before anything leaves**, and says
+   so by name. A problem imported before that date kept its number on the
+   version's `config`, which no longer exists; the message says that too, because
+   the symptom is identical to a problem nobody configured at all.
+
+   There is no language map to write any more: `uva@1` defines its own six.
 
 3. **An activity**, a round that has opened, the problem attached, somebody
    enrolled. **Attach after the configuration is right**: the assignment pins the
@@ -106,35 +110,36 @@ question of what a duplicated *accepted* solution does, which nobody has measure
 
 ## The six languages
 
-What onlinejudge.org offers, and what to call each of them here. **This table is
-documentation, not code**: the map lives in a problem's configuration precisely
-so that a language the archive adds is a re-published problem rather than a
-release of this Runner, and compiling the list in would take that back.
+What onlinejudge.org offers, and what to call each of them here. **The problem
+type defines this list** (2026-08-22) — it is `src/language.rs`, and this table
+is that file written out.
+
+It was in each problem's configuration until then, so that a language the
+archive adds would be a re-published problem rather than a release of this
+Runner. What that missed is that the list belongs to *the archive*, which every
+`uva@1` problem shares: holding it per problem meant writing the same six
+numbers into every import, and an import that wrote none produced a problem
+nobody could submit to — the failure a live run found on 2026-08-16.
 
 | Id | Label | The archive's own | № |
 |---|---|---|---|
-| `c89-gcc` | C89 / ANSI C (GCC) | ANSI C 5.3.0, `-ansi -O2 -lm -lcrypt -DONLINE_JUDGE` | 1 |
-| `java8` | Java 8 (OpenJDK) | JAVA 1.8.0 | 2 |
-| `cpp98-gcc` | C++98 (GCC) | C++ 5.3.0, `-O2 -lm -lcrypt -DONLINE_JUDGE` | 3 |
-| `pascal-fpc` | Pascal (Free Pascal) | PASCAL 3.0.0 | 4 |
-| `cpp11-gcc` | C++11 (GCC) | C++11 5.3.0, `-std=c++11 -O2 …` | 5 |
-| `python3` | Python 3 (CPython) | PYTH3 3.5.1 | 6 |
-
-```json
-"languages": {"c89-gcc": 1, "java8": 2, "cpp98-gcc": 3,
-              "pascal-fpc": 4, "cpp11-gcc": 5, "python3": 6}
-```
+| `c89-gcc` | C89 / ANSI C (GCC 5.3.0) | ANSI C 5.3.0, `-ansi -O2 -lm -lcrypt -DONLINE_JUDGE` | 1 |
+| `java8` | Java 8 (OpenJDK 1.8.0) | JAVA 1.8.0 | 2 |
+| `cpp98-gcc` | C++98 (GCC 5.3.0) | C++ 5.3.0, `-O2 -lm -lcrypt -DONLINE_JUDGE` | 3 |
+| `pascal-fpc` | Pascal (Free Pascal 3.0.0) | PASCAL 3.0.0 | 4 |
+| `cpp11-gcc` | C++11 (GCC 5.3.0) | C++11 5.3.0, `-std=c++11 -O2 …` | 5 |
+| `python3` | Python 3 (CPython 3.5.1) | PYTH3 3.5.1 | 6 |
 
 **Three of these ids are the same ids `standard-io@1` uses** — `c89-gcc`,
-`cpp11-gcc` and `python3` — deliberately, so one label map in the Client serves
-both problem types and a participant reads "C++11 (GCC)" whoever is judging it.
-The three that are not (`cpp98-gcc`, `java8`, `pascal-fpc`) name toolchains this
-project does not run itself; that is the point of forwarding.
+`cpp11-gcc` and `python3` — deliberately, so one screen can resolve a label
+whichever type produced a submission. The three that are not (`cpp98-gcc`,
+`java8`, `pascal-fpc`) name toolchains this project does not run itself; that is
+the point of forwarding.
 
-The compilers are **the archive's, pinned at its versions**, and they are not
-ours: `cpp11-gcc` here is GCC 5.3.0 with UVa's flags, not the GCC 14 in
-`AlgoJudge-Runner/images/gcc`. The id says which language a participant wrote,
-never which machine compiled it.
+**The labels are not `standard-io@1`'s, and must not be.** The compilers here are
+the archive's, pinned at the archive's versions: `cpp11-gcc` there is GCC 14 with
+our flags, and here it is GCC 5.3.0 with UVa's. Showing "C++11 (GCC)" in both
+places would tell a participant the two were built by the same compiler.
 
 ## Known gaps
 

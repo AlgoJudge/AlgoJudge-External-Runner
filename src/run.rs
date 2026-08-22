@@ -203,8 +203,20 @@ impl Runner {
     }
 
     async fn forward(&mut self, job: &ClaimedJob) -> anyhow::Result<(i64, Entry)> {
-        let setup = problem::read(job.config.as_ref())?;
-        let language = setup.language(job.language.as_deref())?;
+        // Two documents, two questions: the version says which problem, the
+        // assignment says how this course counts it.
+        let setup = problem::read(job.problem_version_props.as_ref(), job.config.as_ref())?;
+
+        // `props.language`, since 2026-08-22. The Server carries the document
+        // without reading a member of it, so which member names the language is
+        // the problem type's to know — and `uva@1` calls it the same thing
+        // `standard-io@1` does.
+        let language = setup.language(
+            job.props
+                .as_ref()
+                .and_then(|p| p.get("language"))
+                .and_then(serde_json::Value::as_str),
+        )?;
 
         let pid = match self.numbers.get(&setup.number) {
             Some(pid) => *pid,

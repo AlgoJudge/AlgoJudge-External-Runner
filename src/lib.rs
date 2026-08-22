@@ -11,6 +11,7 @@
 //! irrelevant to a component that is an HTTP client with a timer.
 
 pub mod config;
+pub mod language;
 pub mod lease;
 pub mod pending;
 pub mod problem;
