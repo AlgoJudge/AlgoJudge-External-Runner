@@ -1,5 +1,39 @@
 //! Holding a job while somebody else's judge thinks about it.
 //!
+//! # This test does not pass, and here is everything that has been ruled out
+//!
+//! Measured 2026-08-22 against a live development stack. It stalls partway
+//! through the submit loop — around the third to eighth attempt, varying — and
+//! **no configured deadline ends it**: not `timeout(30s)`, not
+//! `read_timeout(20s)`, not `connect_timeout(10s)`.
+//!
+//! Excluded, each by a measurement taken **while a request was stalled**:
+//!
+//! - **The Server.** `/instance` 8 ms, `/health` 4 ms, and the byte-identical
+//!   multipart POST by `curl` **28 ms**, all during the stall. Four probes,
+//!   four times.
+//! - **The multipart shape.** The same four parts by `curl`, from a fresh
+//!   activity, through the closed-round 404 and into 409: every request under
+//!   55 ms.
+//! - **Connection reuse.** `pool_max_idle_per_host(0)` — still stalls.
+//! - **The container's networking.** Ten fresh connections from a container to
+//!   the host gateway: **2 ms**, ten out of ten.
+//! - **IPv6.** `host.docker.internal` really does resolve to an IPv6 address
+//!   that refuses connections *and* an IPv4 one that works — a genuine wart —
+//!   but pointing `AJ_TEST_SERVER` at the IPv4 literal stalls identically.
+//! - **The blob store.** `/health` exercises a write-read-delete and answered
+//!   in 4 ms mid-stall.
+//! - **Single-threaded timers.** A second worker thread did not free it.
+//!
+//! What `/proc` shows during the stall: every thread asleep in `epoll_wait` or
+//! a futex, **one** ESTABLISHED socket to the Server, and **both its queues
+//! empty** — nothing waiting to be sent, nothing waiting to be read. The
+//! request went out, the answer came back, and the future never woke.
+//!
+//! That is a lost wakeup inside this process, not a slow anything. The next
+//! step is a debugger or `tokio-console` on the stalled binary; every cheaper
+//! avenue above has been spent.
+//!
 //! **The behaviour with no output.** A lease being renewed looks exactly like
 //! one that has not expired yet, so the only way to see it is to hold a job past
 //! the deadline the Server granted and then ask the Server whose it is.
