@@ -21,6 +21,10 @@ use crate::uva::uhunt::Row;
 
 /// The result document, as the `uva@1` renderer reads it.
 ///
+/// **`type` is one string** — `uva@1` — since 2026-08-22. It was `kind` beside
+/// `version`, which was one of four spellings of a convention decided as one
+/// string in August; a convention with four spellings is not a convention.
+///
 /// **Timestamps are seconds since the epoch, and say so in their names.** The
 /// specification's example wrote ISO strings; producing those would mean either
 /// a date library for two fields or hand-rolled calendar arithmetic, and a
@@ -34,8 +38,7 @@ pub fn details(
     solved: bool,
 ) -> serde_json::Value {
     json!({
-        "kind": "uva",
-        "version": 1,
+        "type": "uva@1",
         "score": if solved { 1 } else { 0 },
         "maxScore": 1,
         "external": {
@@ -63,8 +66,7 @@ pub fn details(
 /// the case somebody will ask about, and "it did not work" is not an answer.
 pub fn details_of_failure(entry: &Entry, sid: i64, why: &str) -> serde_json::Value {
     json!({
-        "kind": "uva",
-        "version": 1,
+        "type": "uva@1",
         "external": {
             "judge": "onlinejudge.org",
             "problemNumber": entry.problem_number,
