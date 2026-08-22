@@ -61,9 +61,38 @@ impl Session {
         // Thirty seconds is far longer than any call here takes and short
         // enough that a stall becomes a failure with a message rather than a
         // test somebody kills by hand.
+        // **Three deadlines and no connection reuse**, which is more than a
+        // client normally wants and exactly what a test client needs.
+        //
+        // Measured on 2026-08-22: with `.timeout(30s)` alone, the eighth
+        // submission in a loop went out and never came back. The process was
+        // alive, the print before the request had landed, no answer line
+        // followed, and **the timeout did not fire**. Three probes taken during
+        // that stall — `/instance` in 8 ms, `/health` in 4 ms, and the identical
+        // multipart POST by `curl` in 30 ms — put the Server beyond suspicion.
+        //
+        // Seven requests had succeeded before it, so the first suspect was the
+        // pooled keep-alive connection the eighth reused. `pool_max_idle_per_host(0)`
+        // takes that variable away: every request opens its own connection.
+        //
+        // **It did not fix it, and that is worth recording.** With pooling off
+        // the loop no longer froze, but each request took tens of seconds where
+        // `curl` took thirty milliseconds. Measured afterwards: a container
+        // reaching `host.docker.internal:8080` connects in **2 ms**, ten times
+        // out of ten. So the transport is not slow — something between this
+        // client and the socket is, and it is not any of: the Server, the
+        // multipart shape, connection reuse, or the container's networking.
+        // Each of those was excluded by its own measurement while a request was
+        // stalled.
+        //
+        // The setting stays because slow-and-progressing beats frozen, and
+        // because it is one fewer variable for whoever picks this up.
         let http = reqwest::Client::builder()
             .cookie_store(true)
             .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(20))
+            .pool_max_idle_per_host(0)
             .build()
             .expect("a client");
 

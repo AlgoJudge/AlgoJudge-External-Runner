@@ -87,7 +87,20 @@ async fn uhunt_still_thinking(server: &MockServer, sid: i64, pid: i64) {
 /// The numbers are the smallest the configuration permits: the poll floor is
 /// twenty seconds — it is somebody else's service — and the poll interval has to
 /// fit four times inside the lease, so eighty is the floor for the lease too.
-#[tokio::test]
+// **Two worker threads, and that is a finding rather than a preference.**
+//
+// `#[tokio::test]` defaults to a single-threaded runtime. Every deadline in
+// this file — `timeout`, `connect_timeout`, `read_timeout` — is a tokio timer,
+// and a timer on a single-threaded runtime cannot fire while that one thread is
+// blocked. Measured on 2026-08-22: around the seventh request the loop froze
+// with **none of the three firing**, while the Server answered three separate
+// probes in single-digit milliseconds. A stalled network call would have been
+// cut by a deadline; a blocked thread is what explains all three failing at
+// once.
+//
+// A second worker leaves the timer thread free, so a blocked call becomes a
+// timeout with a message instead of a silence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a development Server; set AJ_TEST_SERVER. Takes about three minutes."]
 async fn a_held_job_outlives_the_lease_it_was_granted() {
     let admin = stack::Session::admin().await;
