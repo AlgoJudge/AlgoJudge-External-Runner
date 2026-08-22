@@ -24,12 +24,25 @@ pub fn api() -> String {
     std::env::var("AJ_TEST_SERVER").unwrap_or_else(|_| "http://localhost:8080/api/v1".into())
 }
 
+/// A name nothing else in the database holds.
+///
+/// **A millisecond is not unique enough**, and that is measured rather than
+/// supposed: `lease.rs` declares `mod stack;`, so both tests are compiled into
+/// one binary and libtest runs them at once — two calls landed in the same
+/// millisecond and the second `POST /problems` came back **500**, a unique
+/// index violation on `IX_Problems_Slug` reported as an internal error.
+///
+/// A counter fixes it inside one process; the clock still separates one run
+/// from the next.
 fn unique(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("a clock")
         .as_millis();
-    format!("{prefix}{now}")
+    format!("{prefix}{now}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Somebody signed in, holding their cookie.
@@ -39,8 +52,18 @@ pub struct Session {
 
 impl Session {
     pub async fn admin() -> Self {
+        // **A timeout, and it is the whole reason this file could hang.** A
+        // `reqwest` client has none by default, so one request that never
+        // answers blocks for ever — which is what happened: the submit loop is
+        // bounded at forty attempts and stood for over ten minutes inside one
+        // of them, printing nothing, looking exactly like a deadlock.
+        //
+        // Thirty seconds is far longer than any call here takes and short
+        // enough that a stall becomes a failure with a message rather than a
+        // test somebody kills by hand.
         let http = reqwest::Client::builder()
             .cookie_store(true)
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("a client");
 
@@ -148,10 +171,18 @@ pub struct Ready {
 /// version published afterwards is not what a job will read. That cost an
 /// end-to-end run on 2026-08-16 two attempts.
 pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Ready {
+    // **Each step says it happened.** This is a dozen round trips to a Server
+    // and one of them reaches `onlinejudge.org`; when it stalls, a test that
+    // printed nothing was indistinguishable from a hang, and there was no way
+    // to tell which step it had stalled on.
+    let step = |what: &str| eprintln!("  · {what}");
+
+    step("allowing external judging");
     admin.allow_external_judging().await;
 
     // The statement, fetched by the Server because the archive sends no
     // `Access-Control-Allow-Origin` and nothing else can read it.
+    step("fetching the statement from onlinejudge.org");
     let statement = admin
         .post(
             "/files/fetch",
@@ -162,6 +193,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
         .await;
     let file = statement["id"].as_str().expect("a file id").to_owned();
 
+    step("creating the problem");
     let problem = admin
         .post(
             "/problems",
@@ -175,6 +207,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
         .await;
     let problem_id = problem["id"].as_str().expect("a problem id").to_owned();
 
+    step("publishing a version");
     admin
         .post(
             &format!("/problems/{problem_id}/versions"),
@@ -197,6 +230,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
         )
         .await;
 
+    step("creating the activity");
     let activity = unique("PROBE");
     admin
         .post(
@@ -216,6 +250,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
         )
         .await;
 
+    step("opening a round");
     let round = admin
         .post(
             &format!("/activities/{activity}/series"),
@@ -231,6 +266,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
         .await;
     let round_id = round["id"].as_str().expect("a round id").to_owned();
 
+    step("attaching the problem");
     admin
         .post(
             &format!("/series/{round_id}/problems"),
@@ -238,6 +274,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
         )
         .await;
 
+    step("enrolling");
     admin
         .post(&format!("/activities/{activity}/enrolment"), json!({}))
         .await;
@@ -253,7 +290,18 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
 pub async fn submit(admin: &Session, ready: &Ready, source: &str) -> String {
     let path = format!("/activities/{}/problems/A/submissions", ready.activity);
 
-    for _ in 0..40 {
+    // Eighty seconds at most, and it says so while it waits: a silent loop
+    // here and a silent sleep in `lease.rs` were together three minutes of no
+    // output, which reads exactly like a hang.
+    //
+    // **Each attempt announces itself before the request, not after.** A run on
+    // 2026-08-22 stalled here for over ten minutes with the loop bounded at
+    // forty attempts and a thirty-second client timeout in place — which is
+    // impossible if the loop was turning, so the next run has to be able to say
+    // whether the request was ever sent.
+    for attempt in 0..40 {
+        eprintln!("  submitting, attempt {} of 40", attempt + 1);
+
         // **One opaque document, and a file name.** The language was a field
         // the Server read; it is a member of `props` now, and the Server named
         // pasted source from a table of seven extensions it no longer has — so
@@ -270,12 +318,14 @@ pub async fn submit(admin: &Session, ready: &Ready, source: &str) -> String {
             .multipart(form)
             .send()
             .await
-            .expect("submitting");
+            .unwrap_or_else(|e| panic!("submitting: {e}"));
 
-        if answer.status().is_success() {
+        let status = answer.status();
+        if status.is_success() {
             let body: Value = answer.json().await.expect("a submission");
             return body["id"].as_str().expect("a submission id").to_owned();
         }
+        eprintln!("    answered {status}");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }

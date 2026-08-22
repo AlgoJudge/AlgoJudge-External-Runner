@@ -142,16 +142,54 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
         let _ = runner.work(&identity).await;
     });
 
-    // Past the deadline, and past the sweep that would have reclaimed it.
-    tokio::time::sleep(Duration::from_secs(120)).await;
+    // **Watched rather than slept through.** This was one `sleep(120)` and then
+    // a single look, which had three faults: it printed nothing for two minutes
+    // so an ordinary slow run was indistinguishable from a hang, it waited the
+    // whole time even when the answer had already gone wrong, and a failure
+    // said only what the state was at the end rather than when it changed.
+    //
+    // It cannot be made quick. The floor is the Server's own: a lease is
+    // clamped to sixty seconds and the poll interval has to fit four times
+    // inside it, so eighty is the shortest lease this can be run with, and the
+    // evidence is the job still being held *after* it. What it can be is
+    // legible while it waits and immediate when it fails.
+    let path = format!("/activities/{}/submissions/{submission}", ready.activity);
+    let deadline = Duration::from_secs(120);
+    let started = std::time::Instant::now();
+    let mut last = String::new();
 
-    let seen = admin
-        .get(&format!(
-            "/activities/{}/submissions/{submission}",
-            ready.activity
-        ))
-        .await;
+    while started.elapsed() < deadline {
+        let seen = admin.get(&path).await;
+        let state = seen["state"].as_str().unwrap_or("?").to_owned();
+
+        if state != last {
+            eprintln!("  {:>3}s  {state}", started.elapsed().as_secs());
+            last = state.clone();
+        }
+
+        // **The failure this test exists to catch, the moment it happens.** A
+        // lease that expired is a job back in the queue: the Server hands it to
+        // whoever asks next, and this Runner is still holding the archive's
+        // side of the same submission.
+        if state == "queued" {
+            working.abort();
+            let _ = working.await;
+            panic!(
+                "the job was taken back after {}s, while this Runner was still                  holding it: {seen}",
+                started.elapsed().as_secs(),
+            );
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    let seen = admin.get(&path).await;
+
+    // Reaped rather than only cancelled: `abort` marks the task, and awaiting it
+    // is what makes sure it has stopped before the stand-ins it is talking to
+    // are dropped at the end of this function.
     working.abort();
+    let _ = working.await;
 
     assert_eq!(
         seen["state"], "running",
