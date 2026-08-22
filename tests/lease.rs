@@ -19,24 +19,21 @@
 //! `pending_timeout` was sixty seconds — the Runner gave up on the archive
 //! before the lease could matter.
 //!
-//! **What is not fixed, and makes this test unable to fail.** `ProgressAsync` in
-//! the Server extends a held lease by `DefaultLease`, ten minutes, whatever the
-//! Runner asked for at claim time:
+//! **The fifth was in the Server, and is fixed.** `ProgressAsync` extended a
+//! held lease by `DefaultLease` — ten minutes — whatever the Runner asked for at
+//! claim, and `Runner::take` reports progress the instant it takes a job. So the
+//! eighty seconds configured here were granted, reported back as eighty, and
+//! replaced by six hundred a fraction of a second later: the claim answer said
+//! `22:09:52` and the row said `22:18:32`. Nothing on either side disagreed out
+//! loud, and this test passed with `renew_everything()` deleted.
 //!
-//! ```text
-//! await ExtendAsync(runner, jobId, leaseToken, DefaultLease, ct);
-//! ```
+//! An `EvaluationJob` now records the lease it was granted and a heartbeat
+//! renews by that. Measured afterwards, on both sides of the change:
 //!
-//! `Runner::take` reports progress the instant it takes a job, so the eighty
-//! seconds this test configures — granted, and reported back as eighty — become
-//! six hundred a fraction of a second later. Measured: the claim answer said
-//! `22:09:52`, the row said `22:18:32`.
-//!
-//! So nothing here is ever close to expiring, and **deleting
-//! `renew_everything()` from the loop leaves this test passing** — checked, not
-//! assumed. Until the Server extends by the lease the job was granted rather
-//! than by a global default, this test proves that a job survives ten minutes,
-//! which nobody doubted.
+//! - with renewal, the job is still `running` at 150s — **passes**;
+//! - with `renew_everything()` deleted, it goes back to `queued` at **100s** —
+//!   eighty seconds of lease and up to thirty of reaper cadence — and this test
+//!   says so.
 //!
 //! **The behaviour with no output.** A lease being renewed looks exactly like
 //! one that has not expired yet, so the only way to see it is to hold a job past
@@ -325,7 +322,7 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
             working.abort();
             let _ = working.await;
             panic!(
-                "the job was taken back after {}s of holding, while this Runner                  was still holding it: {seen}",
+                "the job was taken back after {}s of holding, while this Runner was still holding it: {seen}",
                 holding.elapsed().as_secs(),
             );
         }
