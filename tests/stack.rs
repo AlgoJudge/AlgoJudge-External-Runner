@@ -180,12 +180,18 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
             &format!("/problems/{problem_id}/versions"),
             json!({
                 "statements": [{ "fileId": file }],
-                // **Not optional.** Without a language the Runner refuses the
-                // job before anything leaves, saying the configuration cannot
-                // be read.
-                "config": {
+                // **`props`, not `config`, since 2026-08-22.** The number says
+                // *which problem this is* — identity, which every assignment
+                // inherits — and `config` is settings, of which only the
+                // assignment's layer is left. Without it the Runner refuses the
+                // job before anything leaves and says which field is missing.
+                //
+                // **No language map any more**: `uva@1` defines the archive's
+                // six itself, because the list belongs to the archive and every
+                // problem in it shares them.
+                "props": {
+                    "type": "uva@1",
                     "uva": { "problemNumber": problem_number },
-                    "languages": { "cpp": 5 },
                 },
             }),
         )
@@ -202,7 +208,9 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
                 "rankingType": "icpc",
                 "timeZone": "Europe/Warsaw",
                 "joinPolicy": "open",
-                "languages": ["cpp"],
+                // No `languages` here: an activity stopped carrying a list on
+                // 2026-08-22. The allowed set is the assignment's, and for
+                // `uva@1` the type's own six are the whole of it.
                 "attachmentVisibility": [{ "name": "source", "visibility": "participant" }],
             }),
         )
@@ -246,9 +254,14 @@ pub async fn submit(admin: &Session, ready: &Ready, source: &str) -> String {
     let path = format!("/activities/{}/problems/A/submissions", ready.activity);
 
     for _ in 0..40 {
+        // **One opaque document, and a file name.** The language was a field
+        // the Server read; it is a member of `props` now, and the Server named
+        // pasted source from a table of seven extensions it no longer has — so
+        // the sender names it or the submission is refused.
         let form = reqwest::multipart::Form::new()
-            .text("language", "cpp")
+            .text("props", r#"{"type":"uva@1","language":"cpp11-gcc"}"#)
             .text("code", source.to_owned())
+            .text("fileName", "main.cpp")
             .text("sha256", sha256_of(source));
 
         let answer = admin
