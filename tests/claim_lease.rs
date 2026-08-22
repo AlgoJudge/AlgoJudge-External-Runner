@@ -59,6 +59,7 @@ async fn a_claim_asks_for_the_lease_it_was_configured_with() {
 #[ignore = "needs a development Server; set AJ_TEST_SERVER"]
 async fn the_server_grants_the_lease_that_was_asked_for() {
     stack::logs();
+    stack::heartbeat();
     let admin = stack::Session::admin().await;
     let ready = stack::a_problem_to_submit_to(&admin, 100).await;
     stack::submit(
