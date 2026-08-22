@@ -45,80 +45,134 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}{now}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
+/// The Runner's own log, on stderr.
+///
+/// **Without this the Runner is mute.** It reports through `tracing`, and
+/// `tracing` with no subscriber installed discards everything — so a job that
+/// failed in twenty-one milliseconds said only "failed", and the one sentence
+/// naming the reason was written and thrown away. `RUST_LOG` still overrides.
+pub fn logs() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("algojudge_runner_uva=debug,info"));
+    // Not `init`: two tests in one binary would each try, and the second would
+    // panic on an installed global.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_test_writer()
+        .try_init();
+}
+
+/// A line every five seconds, for as long as the test runs.
+///
+/// **The discriminator the diagnosis was missing.** When a request stalls the
+/// whole process goes quiet, and quiet has two very different causes: a runtime
+/// that is dead, or a runtime that is fine with one task that will never be
+/// woken. Nothing measured so far could tell them apart. This keeps ticking in
+/// the second case and stops in the first.
+pub fn heartbeat() {
+    tokio::spawn(async {
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            eprintln!("    ♥ {}s", started.elapsed().as_secs());
+        }
+    });
+}
+
+/// Sends, and refuses to wait for ever.
+///
+/// **`reqwest`'s own three deadlines have never fired on the stall** — not
+/// `timeout`, not `read_timeout`, not `connect_timeout` — so this asks tokio
+/// directly. If this one fires, the runtime is alive and one request is wedged,
+/// and the message says which. If it does not fire either, the timer wheel is
+/// not turning and nothing built on it will save this test.
+async fn send(builder: reqwest::RequestBuilder, what: &str) -> reqwest::Response {
+    match tokio::time::timeout(std::time::Duration::from_secs(25), builder.send()).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(e)) => panic!("{what}: {e}"),
+        Err(_) => panic!("{what}: no answer in 25s, and reqwest's own timeout never fired"),
+    }
+}
+
 /// Somebody signed in, holding their cookie.
+///
+/// **It holds the cookie and not a client**, and that is an experiment rather
+/// than a preference — see `client()`.
+#[derive(Clone)]
 pub struct Session {
-    http: reqwest::Client,
+    cookie: String,
 }
 
 impl Session {
-    pub async fn admin() -> Self {
-        // **A timeout, and it is the whole reason this file could hang.** A
-        // `reqwest` client has none by default, so one request that never
-        // answers blocks for ever — which is what happened: the submit loop is
-        // bounded at forty attempts and stood for over ten minutes inside one
-        // of them, printing nothing, looking exactly like a deadlock.
-        //
-        // Thirty seconds is far longer than any call here takes and short
-        // enough that a stall becomes a failure with a message rather than a
-        // test somebody kills by hand.
-        // **Three deadlines and no connection reuse**, which is more than a
-        // client normally wants and exactly what a test client needs.
-        //
-        // Measured on 2026-08-22: with `.timeout(30s)` alone, the eighth
-        // submission in a loop went out and never came back. The process was
-        // alive, the print before the request had landed, no answer line
-        // followed, and **the timeout did not fire**. Three probes taken during
-        // that stall — `/instance` in 8 ms, `/health` in 4 ms, and the identical
-        // multipart POST by `curl` in 30 ms — put the Server beyond suspicion.
-        //
-        // Seven requests had succeeded before it, so the first suspect was the
-        // pooled keep-alive connection the eighth reused. `pool_max_idle_per_host(0)`
-        // takes that variable away: every request opens its own connection.
-        //
-        // **It did not fix it, and that is worth recording.** With pooling off
-        // the loop no longer froze, but each request took tens of seconds where
-        // `curl` took thirty milliseconds. Measured afterwards: a container
-        // reaching `host.docker.internal:8080` connects in **2 ms**, ten times
-        // out of ten. So the transport is not slow — something between this
-        // client and the socket is, and it is not any of: the Server, the
-        // multipart shape, connection reuse, or the container's networking.
-        // Each of those was excluded by its own measurement while a request was
-        // stalled.
-        //
-        // The setting stays because slow-and-progressing beats frozen, and
-        // because it is one fewer variable for whoever picks this up.
-        let http = reqwest::Client::builder()
-            .cookie_store(true)
+    /// A client that has never sent anything before.
+    ///
+    /// **One client used to serve the whole session, and that is the last thing
+    /// left unexcluded.** The stall recorded in `lease.rs` arrives after a dozen
+    /// or so requests on one client — the third submit attempt in one run, the
+    /// eighth in another, but the twelfth and the seventeenth counting from
+    /// login, because the eight setup calls go through the same one. Seven
+    /// candidates were excluded by measurement and not one of them touched the
+    /// client object itself: `pool_max_idle_per_host(0)` took away reused
+    /// connections and left the shared resolver, the shared connector and the
+    /// cookie jar's lock exactly where they were.
+    ///
+    /// So: nothing shared at all. A client per request, and the session carried
+    /// as a header rather than by a jar. If the stall goes, it lives in that
+    /// state; if it stays, it is process-wide and a debugger is next.
+    ///
+    /// The three deadlines stay. None of them has ever fired on the stall — that
+    /// is part of what makes it strange — but a run that fails with a message
+    /// beats one somebody kills by hand.
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .read_timeout(std::time::Duration::from_secs(20))
-            .pool_max_idle_per_host(0)
             .build()
-            .expect("a client");
+            .expect("a client")
+    }
 
-        let answer = http
-            .post(format!("{}/identity/login?useSessionCookies=true", api()))
-            .json(&json!({ "email": "admin", "password": "admin-development-only" }))
-            .send()
-            .await
-            .expect("the Server is up — is a development stack running?");
+    /// A request already carrying the session, on a client of its own.
+    pub fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        Self::client()
+            .request(method, format!("{}{path}", api()))
+            .header(reqwest::header::COOKIE, &self.cookie)
+    }
 
-        assert!(
-            answer.status().is_success(),
-            "signing in: {}",
-            answer.status()
-        );
-        Self { http }
+    pub async fn admin() -> Self {
+        let answer = send(
+            Self::client()
+                .post(format!("{}/identity/login?useSessionCookies=true", api()))
+                .json(&json!({ "email": "admin", "password": "admin-development-only" })),
+            "signing in — is a development stack running?",
+        )
+        .await;
+
+        let status = answer.status();
+
+        // Name and value, dropping `Path`, `HttpOnly` and the rest: this is
+        // being sent back, not stored, and a `Set-Cookie` attribute in a
+        // `Cookie` header is not what a server reads.
+        let cookie = answer
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| value.split(';').next())
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        assert!(status.is_success(), "signing in: {status}");
+        assert!(!cookie.is_empty(), "signing in set no cookie: {status}");
+        Self { cookie }
     }
 
     async fn post(&self, path: &str, body: Value) -> Value {
-        let answer = self
-            .http
-            .post(format!("{}{path}", api()))
-            .json(&body)
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("POST {path}: {e}"));
+        let answer = send(
+            self.request(reqwest::Method::POST, path).json(&body),
+            &format!("POST {path}"),
+        )
+        .await;
 
         let status = answer.status();
         let text = answer.text().await.unwrap_or_default();
@@ -127,13 +181,11 @@ impl Session {
     }
 
     async fn put(&self, path: &str, body: Value) -> Value {
-        let answer = self
-            .http
-            .put(format!("{}{path}", api()))
-            .json(&body)
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("PUT {path}: {e}"));
+        let answer = send(
+            self.request(reqwest::Method::PUT, path).json(&body),
+            &format!("PUT {path}"),
+        )
+        .await;
 
         let status = answer.status();
         let text = answer.text().await.unwrap_or_default();
@@ -142,12 +194,11 @@ impl Session {
     }
 
     pub async fn get(&self, path: &str) -> Value {
-        let answer = self
-            .http
-            .get(format!("{}{path}", api()))
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        let answer = send(
+            self.request(reqwest::Method::GET, path),
+            &format!("GET {path}"),
+        )
+        .await;
 
         let status = answer.status();
         let text = answer.text().await.unwrap_or_default();
@@ -311,6 +362,32 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
     Ready { activity }
 }
 
+/// A multipart body built by hand, with its content type.
+///
+/// **`reqwest::multipart::Form` is what stalls**, and that is measured rather
+/// than supposed. Three runs stalled on a submit and never on any of the nine
+/// JSON calls that precede it — the eighth submit once, the third, then the
+/// second, the last of those with a client that had sent nothing before. The
+/// same four parts by `curl` answer in 28 ms while the test is frozen, so the
+/// Server and the shape are both fine; what is left between them is the encoder.
+///
+/// So the parts are laid out as bytes with a `Content-Length` the client cannot
+/// get wrong, instead of a body it streams and computes.
+fn multipart_body(parts: &[(&str, &str)]) -> (String, Vec<u8>) {
+    let boundary = format!("aj{}", unique(""));
+    let mut body = String::new();
+    for (name, value) in parts {
+        body.push_str(&format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        ));
+    }
+    body.push_str(&format!("--{boundary}--\r\n"));
+    (
+        format!("multipart/form-data; boundary={boundary}"),
+        body.into_bytes(),
+    )
+}
+
 /// Waits for the scheduler to open the round, then submits.
 ///
 /// A round is opened by the scheduler's own scan rather than by the request that
@@ -323,11 +400,11 @@ pub async fn submit(admin: &Session, ready: &Ready, source: &str) -> String {
     // here and a silent sleep in `lease.rs` were together three minutes of no
     // output, which reads exactly like a hang.
     //
-    // **Each attempt announces itself before the request, not after.** A run on
-    // 2026-08-22 stalled here for over ten minutes with the loop bounded at
-    // forty attempts and a thirty-second client timeout in place — which is
-    // impossible if the loop was turning, so the next run has to be able to say
-    // whether the request was ever sent.
+    // **Each attempt announces itself before the request and times it.** A run
+    // on 2026-08-22 stalled here for over ten minutes with the loop bounded at
+    // forty attempts and a thirty-second client timeout in place — impossible if
+    // the loop was turning — so an attempt has to say whether its request was
+    // ever sent, and how long the answer took when it came.
     for attempt in 0..40 {
         eprintln!("  submitting, attempt {} of 40", attempt + 1);
 
@@ -335,26 +412,29 @@ pub async fn submit(admin: &Session, ready: &Ready, source: &str) -> String {
         // the Server read; it is a member of `props` now, and the Server named
         // pasted source from a table of seven extensions it no longer has — so
         // the sender names it or the submission is refused.
-        let form = reqwest::multipart::Form::new()
-            .text("props", r#"{"type":"uva@1","language":"cpp11-gcc"}"#)
-            .text("code", source.to_owned())
-            .text("fileName", "main.cpp")
-            .text("sha256", sha256_of(source));
+        let (content_type, body) = multipart_body(&[
+            ("props", r#"{"type":"uva@1","language":"cpp11-gcc"}"#),
+            ("code", source),
+            ("fileName", "main.cpp"),
+            ("sha256", &sha256_of(source)),
+        ]);
 
-        let answer = admin
-            .http
-            .post(format!("{}{path}", api()))
-            .multipart(form)
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("submitting: {e}"));
+        let sent = std::time::Instant::now();
+        let answer = send(
+            admin
+                .request(reqwest::Method::POST, &path)
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(body),
+            "submitting",
+        )
+        .await;
 
         let status = answer.status();
+        eprintln!("    answered {status} in {}ms", sent.elapsed().as_millis());
         if status.is_success() {
-            let body: Value = answer.json().await.expect("a submission");
-            return body["id"].as_str().expect("a submission id").to_owned();
+            let parsed: Value = answer.json().await.expect("a submission");
+            return parsed["id"].as_str().expect("a submission id").to_owned();
         }
-        eprintln!("    answered {status}");
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }

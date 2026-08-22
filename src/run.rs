@@ -131,6 +131,17 @@ impl Runner {
             if self.pending.len() < self.config.max_pending {
                 match self.server.claim(Some(self.config.lease_seconds)).await {
                     Ok(Some(job)) => {
+                        // **Asked and granted, side by side.** The Server may
+                        // apply its own default when it reads no request, and
+                        // every lease guard in `Config` computes with the number
+                        // on this side — so a disagreement here is invisible
+                        // from either log alone.
+                        tracing::info!(
+                            job = %job.job_id,
+                            asked = self.config.lease_seconds,
+                            granted = %job.lease_expires_at,
+                            "claimed"
+                        );
                         claiming.reset();
                         self.take(job).await;
                         continue;
