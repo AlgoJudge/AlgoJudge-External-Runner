@@ -20,10 +20,13 @@ use serde::Deserialize;
 pub struct Setup {
     /// The public number — what a person types and what `localid` is set to.
     pub number: i64,
-    /// AlgoJudge's language name to the archive's own id.
+    /// AlgoJudge's language id to the archive's own number.
     ///
     /// Held here rather than compiled in, so a language UVa adds is a
-    /// re-published problem and not a release of this Runner.
+    /// re-published problem and not a release of this Runner. **That is also
+    /// why there is no validation of the ids**: a list checked against would be
+    /// the compiled-in list this was written to avoid. The six the archive
+    /// offers, and what to call them, are a table in the README.
     pub languages: BTreeMap<String, i64>,
     /// Which verdicts count as solved. Empty is not allowed: a problem nobody
     /// can pass is a configuration mistake, not a strict activity.
@@ -126,7 +129,8 @@ mod tests {
         document(
             r#"{"format":"uva","version":1,
                 "uva":{"problemNumber":100,"specialJudge":false},
-                "languages":{"c":1,"cpp":3,"cpp11":5,"java":2,"pascal":4,"python":6},
+                "languages":{"c89-gcc":1,"java8":2,"cpp98-gcc":3,
+                             "pascal-fpc":4,"cpp11-gcc":5,"python3":6},
                 "scoring":{"maxScore":1,"acceptedVerdicts":["AC"]}}"#,
         )
     }
@@ -135,7 +139,7 @@ mod tests {
     fn the_number_and_the_languages_come_out_of_the_configuration() {
         let setup = read(full().as_ref()).unwrap();
         assert_eq!(setup.number, 100);
-        assert_eq!(setup.language(Some("cpp11")).unwrap(), 5);
+        assert_eq!(setup.language(Some("cpp11-gcc")).unwrap(), 5);
         assert_eq!(setup.accepted, vec!["AC".to_owned()]);
     }
 
@@ -145,7 +149,7 @@ mod tests {
     fn an_activity_may_widen_what_counts_as_solved() {
         let lenient = document(
             r#"{"format":"uva","uva":{"problemNumber":100},
-                "languages":{"c":1},
+                "languages":{"c89-gcc":1},
                 "scoring":{"acceptedVerdicts":["AC","PE"]}}"#,
         );
         let setup = read(lenient.as_ref()).unwrap();
@@ -154,7 +158,7 @@ mod tests {
 
     #[test]
     fn strict_is_the_default_when_nothing_says_otherwise() {
-        let bare = document(r#"{"uva":{"problemNumber":100},"languages":{"c":1}}"#);
+        let bare = document(r#"{"uva":{"problemNumber":100},"languages":{"c89-gcc":1}}"#);
         assert_eq!(read(bare.as_ref()).unwrap().accepted, vec!["AC".to_owned()]);
     }
 
@@ -164,7 +168,7 @@ mod tests {
         let no_config = read(None).unwrap_err().to_string();
         assert!(no_config.contains("no UVa problem number"), "{no_config}");
 
-        let no_number = document(r#"{"languages":{"c":1}}"#);
+        let no_number = document(r#"{"languages":{"c89-gcc":1}}"#);
         let refused = read(no_number.as_ref()).unwrap_err().to_string();
         assert!(refused.contains("uva.problemNumber"), "{refused}");
 
@@ -173,7 +177,7 @@ mod tests {
         assert!(refused.contains("no languages"), "{refused}");
 
         let wrong_format =
-            document(r#"{"format":"standard-io","uva":{"problemNumber":100},"languages":{"c":1}}"#);
+            document(r#"{"format":"standard-io","uva":{"problemNumber":100},"languages":{"c89-gcc":1}}"#);
         let refused = read(wrong_format.as_ref()).unwrap_err().to_string();
         assert!(refused.contains("not \"uva\""), "{refused}");
     }
@@ -184,7 +188,7 @@ mod tests {
         let setup = read(full().as_ref()).unwrap();
         let refused = setup.language(Some("rust")).unwrap_err().to_string();
         assert!(refused.contains("rust"), "{refused}");
-        assert!(refused.contains("cpp11"), "{refused}");
+        assert!(refused.contains("cpp11-gcc"), "{refused}");
 
         let missing = setup.language(None).unwrap_err().to_string();
         assert!(missing.contains("names no language"), "{missing}");

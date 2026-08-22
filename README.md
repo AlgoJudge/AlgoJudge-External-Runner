@@ -70,11 +70,14 @@ whoever owns it.
        POST /problems      {"slug":"UVa-100", "type":"uva@1", "external":true}
        POST /problems/{id}/versions
            {"statements":[…], "config":{"uva":{"problemNumber":100},
-                                        "languages":{"cpp":5}}}
+                                        "languages":{"cpp11-gcc":5}}}
 
    **The language map is not optional.** Without it this Runner refuses the job
    before anything leaves, saying the configuration cannot be read — which is the
    right answer, and was found the hard way.
+
+   The **names** are AlgoJudge's and the **numbers** are the archive's; see the
+   table below for both.
 
 3. **An activity**, a round that has opened, the problem attached, somebody
    enrolled. **Attach after the configuration is right**: the assignment pins the
@@ -101,13 +104,46 @@ whoever owns it.
 to be wrong: it keeps the account's solved count honest, and it avoids the
 question of what a duplicated *accepted* solution does, which nobody has measured.
 
+## The six languages
+
+What onlinejudge.org offers, and what to call each of them here. **This table is
+documentation, not code**: the map lives in a problem's configuration precisely
+so that a language the archive adds is a re-published problem rather than a
+release of this Runner, and compiling the list in would take that back.
+
+| Id | Label | The archive's own | № |
+|---|---|---|---|
+| `c89-gcc` | C89 / ANSI C (GCC) | ANSI C 5.3.0, `-ansi -O2 -lm -lcrypt -DONLINE_JUDGE` | 1 |
+| `java8` | Java 8 (OpenJDK) | JAVA 1.8.0 | 2 |
+| `cpp98-gcc` | C++98 (GCC) | C++ 5.3.0, `-O2 -lm -lcrypt -DONLINE_JUDGE` | 3 |
+| `pascal-fpc` | Pascal (Free Pascal) | PASCAL 3.0.0 | 4 |
+| `cpp11-gcc` | C++11 (GCC) | C++11 5.3.0, `-std=c++11 -O2 …` | 5 |
+| `python3` | Python 3 (CPython) | PYTH3 3.5.1 | 6 |
+
+```json
+"languages": {"c89-gcc": 1, "java8": 2, "cpp98-gcc": 3,
+              "pascal-fpc": 4, "cpp11-gcc": 5, "python3": 6}
+```
+
+**Three of these ids are the same ids `standard-io@1` uses** — `c89-gcc`,
+`cpp11-gcc` and `python3` — deliberately, so one label map in the Client serves
+both problem types and a participant reads "C++11 (GCC)" whoever is judging it.
+The three that are not (`cpp98-gcc`, `java8`, `pascal-fpc`) name toolchains this
+project does not run itself; that is the point of forwarding.
+
+The compilers are **the archive's, pinned at its versions**, and they are not
+ours: `cpp11-gcc` here is GCC 5.3.0 with UVa's flags, not the GCC 14 in
+`AlgoJudge-Runner/images/gcc`. The id says which language a participant wrote,
+never which machine compiled it.
+
 ## Known gaps
 
 - **The long-poll trigger is not built.** The Runner says so at every start.
   Verdicts arrive on the interval net alone, which is slower but not wrong.
-- **The language table has one entry.** `cpp: 5` is the id seen accepted; the
-  rest of the archive's list has not been read, and guessing it would put numbers
-  in a configuration that nobody has watched work.
+- **One of the six numbers has been watched work.** `5` is the id seen accepted.
+  The other five are the archive's own form values and are written down below,
+  but nobody here has submitted through them, and that distinction is the whole
+  of this gap.
 - **Nothing here covers this Runner's own loop against a live Server.**
 
   The conformance cases are often described as owed by this repository, and on
