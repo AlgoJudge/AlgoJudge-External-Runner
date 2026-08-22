@@ -23,6 +23,8 @@ use serde::Deserialize;
 /// The problem, as this Runner needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Setup {
+    /// Which of the six this assignment allows. Empty means all of them.
+    pub languages: Vec<String>,
     /// The public number — what a person types and what `localid` is set to.
     pub number: i64,
     /// Which verdicts count as solved. Empty is not allowed: a problem nobody
@@ -42,6 +44,31 @@ struct Identity {
 #[derive(Debug, Deserialize)]
 struct Judging {
     scoring: Option<Scoring>,
+    /// Which of the archive's languages this assignment allows. Empty means it
+    /// said nothing, which allows all six.
+    #[serde(default)]
+    languages: Vec<String>,
+}
+
+/// What happened when a submission named a language.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Chosen {
+    /// The archive's own form value.
+    Accepted(i64),
+    /// **The manager narrowed the list and this is outside it.** A verdict, not
+    /// an infrastructure failure: the participant chose it, their code may be
+    /// perfect, and what they broke is a rule of the activity — which is what
+    /// `standard-io@1` reports for the same mistake, and the two types must not
+    /// answer it differently.
+    NotAllowed {
+        wanted: String,
+        allowed: Vec<String>,
+    },
+    /// Not a language onlinejudge.org offers at all, or none named. The
+    /// participant chose from a list the platform gave them, so this is the
+    /// platform's fault: an infrastructure failure, and the submission stays
+    /// rejudgeable.
+    NotSubmittable(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,17 +124,26 @@ pub fn read(
     // nothing about scoring gets the strict default, which is the answer a
     // course would have written anyway; refusing would make every attachment
     // carry a document to say "as usual".
-    let accepted = match config
+    let judging = config
         .map(|c| serde_json::from_value::<Judging>(c.clone()))
         .transpose()
-        .map_err(|e| anyhow::anyhow!("the assignment's configuration cannot be read: {e}"))?
-        .and_then(|j| j.scoring)
-    {
+        .map_err(|e| anyhow::anyhow!("the assignment's configuration cannot be read: {e}"))?;
+
+    let languages = judging
+        .as_ref()
+        .map(|j| j.languages.clone())
+        .unwrap_or_default();
+
+    let accepted = match judging.and_then(|j| j.scoring) {
         Some(scoring) if !scoring.accepted_verdicts.is_empty() => scoring.accepted_verdicts,
         _ => vec![STRICT.to_owned()],
     };
 
-    Ok(Setup { number, accepted })
+    Ok(Setup {
+        number,
+        accepted,
+        languages,
+    })
 }
 
 impl Setup {
@@ -119,18 +155,31 @@ impl Setup {
     /// **Against the type's own catalogue**, not against something the problem
     /// carried: `uva@1` offers what onlinejudge.org offers, which is the same
     /// six for every problem in the archive.
-    pub fn language(&self, wanted: Option<&str>) -> anyhow::Result<i64> {
-        let wanted = wanted.ok_or_else(|| {
-            anyhow::anyhow!("the submission names no language, and UVa needs one")
-        })?;
-        crate::language::for_id(wanted)
-            .map(|l| l.number)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "onlinejudge.org does not accept {wanted:?}; it accepts {:?}",
-                    crate::language::ids()
-                )
-            })
+    pub fn language(&self, wanted: Option<&str>) -> Chosen {
+        let Some(wanted) = wanted else {
+            return Chosen::NotSubmittable(
+                "the submission names no language, and UVa needs one".into(),
+            );
+        };
+
+        let Some(known) = crate::language::for_id(wanted) else {
+            return Chosen::NotSubmittable(format!(
+                "onlinejudge.org does not accept {wanted:?}; it accepts {:?}",
+                crate::language::ids()
+            ));
+        };
+
+        // **The manager's subset, and the reason this is a verdict.** An empty
+        // list is the assignment saying nothing, which allows all six — not
+        // allowing none, which would be an assignment nobody could submit to.
+        if !self.languages.is_empty() && !self.languages.iter().any(|l| l == wanted) {
+            return Chosen::NotAllowed {
+                wanted: wanted.to_owned(),
+                allowed: self.languages.clone(),
+            };
+        }
+
+        Chosen::Accepted(known.number)
     }
 }
 
@@ -158,7 +207,7 @@ mod tests {
         // holding them per problem meant writing six numbers into every import,
         // and an import that wrote none produced a problem nobody could submit
         // to.
-        assert_eq!(setup.language(Some("cpp11-gcc")).unwrap(), 5);
+        assert_eq!(setup.language(Some("cpp11-gcc")), Chosen::Accepted(5));
     }
 
     /// The two documents answer different questions, and the assignment's is the
@@ -213,15 +262,64 @@ mod tests {
         assert!(refused.contains("uva@1"), "{refused}");
     }
 
+    /// **The manager narrowed the list, and this is outside it.**
+    ///
+    /// A verdict rather than an infrastructure failure, and the same one
+    /// `standard-io@1` gives: the participant chose it, their code may be
+    /// perfect, and what they broke is a rule of the activity. Two problem
+    /// types answering this differently would make the verdict a property of
+    /// who judged rather than of what happened.
+    #[test]
+    fn a_language_the_assignment_excluded_is_not_allowed_rather_than_unknown() {
+        let narrowed = document(r#"{"languages":["python3"]}"#);
+        let setup = read(identity().as_ref(), narrowed.as_ref()).unwrap();
+
+        // In the archive's six, and outside what this assignment allows.
+        assert_eq!(
+            setup.language(Some("cpp11-gcc")),
+            Chosen::NotAllowed {
+                wanted: "cpp11-gcc".into(),
+                allowed: vec!["python3".into()],
+            },
+        );
+        assert_eq!(setup.language(Some("python3")), Chosen::Accepted(6));
+
+        // Still not submittable, and still for the other reason: an assignment
+        // narrowing the list does not make an unknown language into a rule.
+        assert!(matches!(
+            setup.language(Some("rust")),
+            Chosen::NotSubmittable(_)
+        ));
+    }
+
+    /// An assignment that names none allows all six. **Not none** — an
+    /// assignment allowing nothing would be one nobody could submit to.
+    #[test]
+    fn an_assignment_that_names_no_languages_allows_them_all() {
+        let setup = read(identity().as_ref(), None).unwrap();
+        for id in crate::language::ids() {
+            assert!(
+                matches!(setup.language(Some(id)), Chosen::Accepted(_)),
+                "{id} was refused",
+            );
+        }
+    }
+
     /// A language the archive does not offer is refused by name, with the list.
     #[test]
     fn an_unlisted_language_is_refused_and_says_what_is_on_offer() {
         let setup = read(identity().as_ref(), None).unwrap();
-        let refused = setup.language(Some("rust")).unwrap_err().to_string();
+        // Not a language the archive offers at all — the platform's fault, not
+        // the participant's, so it stays an infrastructure failure.
+        let Chosen::NotSubmittable(refused) = setup.language(Some("rust")) else {
+            panic!("a language onlinejudge.org does not offer must not be submittable");
+        };
         assert!(refused.contains("rust"), "{refused}");
         assert!(refused.contains("cpp11-gcc"), "{refused}");
 
-        let missing = setup.language(None).unwrap_err().to_string();
+        let Chosen::NotSubmittable(missing) = setup.language(None) else {
+            panic!("a submission naming no language cannot be forwarded");
+        };
         assert!(missing.contains("names no language"), "{missing}");
     }
 }

@@ -187,6 +187,26 @@ impl Runner {
     /// Everything that has to happen between claiming a job and waiting for it.
     async fn take(&mut self, job: ClaimedJob) {
         let token = job.lease_token.clone();
+
+        // **A language the assignment excluded is a verdict, not a failure**,
+        // and it is decided before anything is forwarded — nothing should reach
+        // onlinejudge.org that the activity's own rules already refuse.
+        //
+        // The same answer `standard-io@1` gives for the same mistake: the
+        // participant chose it, their code may be perfect, and what they broke
+        // is a rule of the activity. Two problem types answering this
+        // differently would make the verdict a property of who judged rather
+        // than of what happened.
+        if let Err(refusal) = self.allowed(&job) {
+            tracing::info!(job = %job.job_id, %refusal, "refused by the activity's rules");
+            self.send(
+                &job.job_id,
+                &ReportResult::judged(&token, 0.0, 1.0, verdict::POLICY_VIOLATION),
+            )
+            .await;
+            return;
+        }
+
         match self.forward(&job).await {
             Ok(entry) => {
                 if let Err(e) = self.server.progress(&job.job_id, &token).await {
@@ -202,6 +222,27 @@ impl Runner {
         }
     }
 
+    /// Whether this submission may be sent at all.
+    ///
+    /// Read from the same two documents `forward` reads, and deliberately
+    /// before it: a refusal here leaves nothing on somebody else's judge.
+    fn allowed(&self, job: &ClaimedJob) -> Result<(), String> {
+        // Not this check's business. `forward` reports an unreadable
+        // configuration as the infrastructure failure it is, with the message
+        // that names the missing field.
+        let Ok(setup) = problem::read(job.problem_version_props.as_ref(), job.config.as_ref())
+        else {
+            return Ok(());
+        };
+
+        match setup.language(language_of(job.props.as_ref())) {
+            problem::Chosen::NotAllowed { wanted, allowed } => Err(format!(
+                "this problem does not accept {wanted} here; it accepts {allowed:?}"
+            )),
+            _ => Ok(()),
+        }
+    }
+
     async fn forward(&mut self, job: &ClaimedJob) -> anyhow::Result<(i64, Entry)> {
         // Two documents, two questions: the version says which problem, the
         // assignment says how this course counts it.
@@ -211,12 +252,15 @@ impl Runner {
         // without reading a member of it, so which member names the language is
         // the problem type's to know — and `uva@1` calls it the same thing
         // `standard-io@1` does.
-        let language = setup.language(
-            job.props
-                .as_ref()
-                .and_then(|p| p.get("language"))
-                .and_then(serde_json::Value::as_str),
-        )?;
+        let language = match setup.language(language_of(job.props.as_ref())) {
+            problem::Chosen::Accepted(number) => number,
+            // Refused before this by `allowed`, which reports it as a verdict.
+            // Reaching here would mean the two disagreed about the same rule.
+            problem::Chosen::NotAllowed { wanted, allowed } => {
+                anyhow::bail!("{wanted} is not accepted here; the activity allows {allowed:?}")
+            }
+            problem::Chosen::NotSubmittable(why) => anyhow::bail!(why),
+        };
 
         let pid = match self.numbers.get(&setup.number) {
             Some(pid) => *pid,
@@ -531,4 +575,13 @@ impl Runner {
             }
         }
     }
+}
+
+/// Which member of a submission's `props` names the language.
+///
+/// The same member `standard-io@1` reads, deliberately: one label map in the
+/// Client serves both types, and a participant reading their own submission
+/// should not have to know which Runner judged it.
+fn language_of(props: Option<&serde_json::Value>) -> Option<&str> {
+    props?.get("language")?.as_str()
 }
