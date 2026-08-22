@@ -27,7 +27,7 @@ dependencies = [
 [[package]]
 name = "aj-protocol"
 version = "0.1.0"
-source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=affc33835cc31f0f22e979dbac125c99511cbdde#affc33835cc31f0f22e979dbac125c99511cbdde"
+source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=f78df647aea6f9c8b57058440118a10d79cd1bc3#f78df647aea6f9c8b57058440118a10d79cd1bc3"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -52,6 +52,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",

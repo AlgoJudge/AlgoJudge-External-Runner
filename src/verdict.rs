@@ -36,6 +36,14 @@ pub enum Outcome {
 /// Read from <https://onlinejudge.org/index.php?option=com_content&task=view&id=16>
 /// on 2026-08-13. Anything not listed is treated as not-yet-judged rather than
 /// guessed at: a number we do not know is not evidence that a person was wrong.
+/// What a submission the activity's rules refuse is called.
+///
+/// **The same word `standard-io@1` uses**, and that is the point: a participant
+/// who chose a language the manager excluded should read the same verdict
+/// whichever Runner would have judged it. The archive never sees this
+/// submission — nothing is sent — so there is no external verdict to report.
+pub const POLICY_VIOLATION: &str = "PolicyViolation";
+
 pub fn of(id: i64) -> Outcome {
     match id {
         90 => judged("Accepted", "AC"),
