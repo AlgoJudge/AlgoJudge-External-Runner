@@ -149,7 +149,7 @@ places would tell a participant the two were built by the same compiler.
   The other five are the archive's own form values and are written down below,
   but nobody here has submitted through them, and that distinction is the whole
   of this gap.
-- **Nothing here covers this Runner's own loop against a live Server.**
+- **Two of four behaviours around the protocol client are covered; two are not.**
 
   The conformance cases are often described as owed by this repository, and on
   inspection that is imprecise. Those cases exercise **an implementation of the
@@ -158,11 +158,24 @@ places would tell a participant the two were built by the same compiler.
   already drives that code against a live Server. Porting them here would test
   the same lines twice.
 
-  What is genuinely uncovered is what this Runner does *around* that client, and
-  none of it can be reached from `aj-protocol`'s suite:
+  What is worth covering is what this Runner does *around* that client. All of it
+  needs a harness that signs in to a Server, publishes a problem and submits to
+  it — **`tests/stack.rs` is that harness**, added 2026-08-22, and it is a Server
+  session driven the way a person would drive it: a cookie, never a Runner token.
 
-  - **lease renewal actually firing** — it runs on the polling cycle, so a job
-    held while the archive thinks is renewed by a path nobody has watched;
+  Covered:
+
+  - **lease renewal actually firing** — `tests/lease.rs` holds a job past the
+    deadline it was granted and asks the Server whose it is. It fails when
+    `renew_everything()` is deleted, which it did not until `AlgoJudge-Server`
+    stopped replacing a claimed lease with its own default on the first progress
+    report;
+  - **the lease this Runner asks for is the lease it gets** — `tests/claim_lease.rs`,
+    offline on the wire format and live against a Server, because those two were
+    right and wrong respectively at the same time.
+
+  Not covered:
+
   - **a lost lease dropping the job silently** — reporting against a stale lease
     would overwrite whoever holds it now, and the Server's idempotency would not
     help, because it keys on the token this Runner no longer has;
@@ -170,7 +183,9 @@ places would tell a participant the two were built by the same compiler.
     wrong answer** — the distinction the whole module rests on;
   - **serialised submission**, which is a correctness requirement here rather
     than politeness: two in flight at once cannot be told apart on the way back.
+    This one needs the real archive and fresh submissions from the robot account.
 
-  All four need a harness that signs in to a Server, publishes a problem and
-  submits to it. This repository has no such harness, and that — not the
-  conformance cases — is the thing standing in the way.
+  All of these are `#[ignore]`d and need `AJ_TEST_SERVER`, so **CI runs none of
+  them**. A regression in lease renewal will not redden a pull request; somebody
+  has to run it. Closing that needs a CI step that stands a Server up, the way
+  `AlgoJudge-Runner` does for its judging suite.
