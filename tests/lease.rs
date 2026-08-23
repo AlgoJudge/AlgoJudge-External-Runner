@@ -35,6 +35,14 @@
 //!   eighty seconds of lease and up to thirty of reaper cadence — and this test
 //!   says so.
 //!
+//! **The pattern for all of this already existed.**
+//! `a_renewed_lease_outlives_the_deadline_it_was_granted` in
+//! `AlgoJudge-Runner`'s `crates/aj-runner/tests/end_to_end.rs` had solved the
+//! approval deadlock correctly since 2026-08-16 — approving in a spawned task
+//! beside `admitted`, with a comment saying that doing it afterwards would hang
+//! the test rather than fail it. Copying it would have saved every measurement
+//! above.
+//!
 //! **The behaviour with no output.** A lease being renewed looks exactly like
 //! one that has not expired yet, so the only way to see it is to hold a job past
 //! the deadline the Server granted and then ask the Server whose it is.

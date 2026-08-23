@@ -1,12 +1,29 @@
 //! Keeping a job while somebody else's judge thinks about it.
 //!
-//! **`AlgoJudge-Runner` has no equivalent of this.** `Server::renew` exists in
-//! `aj-protocol` and is called from the conformance suite and from nowhere else;
-//! the production loop asks for ten minutes and never renews, because a local
-//! evaluation finishes inside one. This Runner waits up to fifteen minutes on an
+//! **Corrected 2026-08-23.** This said `AlgoJudge-Runner` had no equivalent of
+//! it, and that its production loop asks for ten minutes and never renews. Both
+//! halves stopped being true on 2026-08-16 and the sentence outlived them:
+//! `crates/aj-runner/src/keeper.rs` holds every claimed job and trial, and
+//! `a_renewed_lease_outlives_the_deadline_it_was_granted` in
+//! `crates/aj-runner/tests/end_to_end.rs` is the same test as this module's —
+//! a problem type no Runner in the stack handles so the job stays queued, the
+//! shortest lease the Server grants, and a wait past the reaper's sweep.
+//!
+//! **What is still this module's own is why it needs one.** A local evaluation
+//! finishes inside a lease. This Runner waits up to fifteen minutes on an
 //! archive it does not control, so a job left on a lease it never extends is
 //! reclaimed by the Server, handed to the next Runner, and **submitted to
 //! onlinejudge.org a second time**. That is the failure this module exists for.
+//!
+//! **And one difference is worth copying back.** That keeper renews on a timer
+//! of its own — a quarter of the lease the Server actually *granted*. This
+//! module renews at the top of the archive-polling cycle, computed from the
+//! lease it *asked for*. Riding the poll cycle is why
+//! `Config::refuse_what_cannot_work` needs its four-times rule at all: raising
+//! `AJ_Uva__PollMaxSeconds` to be polite to uHunt stretches renewal with it.
+//! Reading the granted lease is the sturdier half, and the two really could
+//! differ until 2026-08-23, when the Server stopped replacing a claimed lease
+//! with its own default on the first progress report.
 //!
 //! The policy is deliberately dull: **renew every held job on every poll cycle,
 //! unconditionally.** Renewal never shortens a lease — the Server's conformance
