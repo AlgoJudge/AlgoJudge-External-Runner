@@ -50,3 +50,36 @@ jobs:
       # services and no secrets.
       - name: Test
         run: cargo test --workspace
+
+  # **A Dockerfile nothing builds is a Dockerfile that breaks quietly.** The one
+  # here is how this Runner is actually shipped, and it has its own failure modes
+  # the gate above cannot see: a musl target that stops resolving, a base digest
+  # that goes away, a stub-crate trick that silently produces an empty binary.
+  #
+  # The image alone, not the stack. Standing a Server up beside it would make CI
+  # able to run the integration tests that are `#[ignore]`d today — worth doing,
+  # and a decision of its own rather than a side effect of adding an image.
+  image:
+    name: Build the container image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      # Built and not pushed. Where this is published is `AlgoJudge-Ops`'s
+      # question, and that repository does not exist yet.
+      - name: Build
+        run: docker build -t algojudge-runner-uva:ci .
+
+      # It should refuse, by name, and that is the whole assertion: an image that
+      # started with no configuration would be an image that had defaulted the
+      # address of the Server it talks to.
+      - name: It refuses to start with nothing configured
+        run: |
+          set +e
+          output=$(docker run --rm algojudge-runner-uva:ci 2>&1)
+          code=$?
+          set -e
+          test "$code" != "0" || { echo "started with no configuration" >&2; exit 1; }
+          echo "$output" | grep -q 'AJ_Server__BaseUrl is required'             || { echo "refused, but not by name:" >&2; echo "$output" >&2; exit 1; }

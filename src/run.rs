@@ -37,6 +37,7 @@ pub async fn admitted(server: &Server, identity: &Identity, config: &Config) -> 
                 // workers on this: without it a `uva@1` problem is never handed
                 // over, and the queue simply looks empty.
                 external: true,
+                tags: config.tags.clone(),
                 machine: None,
             })
             .await;
