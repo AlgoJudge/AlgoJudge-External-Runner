@@ -22,6 +22,21 @@ pub struct Config {
     pub server_base_url: String,
     pub runner_name: String,
     pub problem_types: Vec<String>,
+
+    /// Which pools this Runner belongs to, from `AJ_Runner__Tags`.
+    ///
+    /// The Server pairs a Runner with work when the two tag lists **share at
+    /// least one** entry, and an empty list on either side means `default` — so
+    /// naming a pool takes this Runner out of the general queue as surely as it
+    /// puts it into a reserved one.
+    ///
+    /// **Read at the first registration and never again.** Every other field
+    /// the Server is told about is refreshed whenever a Runner registers again,
+    /// which is how a restart is reported; this one is not, and the operator
+    /// owns it in the panel from then on. Changing it here afterwards changes
+    /// nothing, deliberately: a restart must not move a Runner into an
+    /// examination's pool.
+    pub tags: Vec<String>,
     pub key_path: String,
 
     pub uva_base_url: String,
@@ -64,6 +79,7 @@ impl Config {
                 std::env::var("HOSTNAME").unwrap_or_else(|_| "algojudge-runner-uva".into())
             }),
             problem_types: list("Runner__ProblemTypes", "uva@1"),
+            tags: tags("Runner__Tags"),
             key_path: var("Runner__KeyPath")
                 .unwrap_or_else(|_| "/var/lib/algojudge-runner-uva/identity.key".into()),
 
@@ -176,6 +192,17 @@ fn list(key: &str, fallback: &str) -> Vec<String> {
         .collect()
 }
 
+/// The pools a Runner belongs to, in the one spelling the Server stores.
+///
+/// **Lowercased here as well as by the Server**, so the start-up log says what
+/// will actually be stored rather than what somebody typed. The Server matches
+/// pools by equality, so `Lab-A` here and `lab-a` on an activity would be two
+/// pools that read as one — and the failure is a queue that never drains with
+/// nothing on any screen to say why.
+fn tags(key: &str) -> Vec<String> {
+    list(key, "").iter().map(|t| t.to_lowercase()).collect()
+}
+
 fn number(key: &str, fallback: u64) -> anyhow::Result<u64> {
     match var(key) {
         Err(_) => Ok(fallback),
@@ -221,6 +248,7 @@ mod tests {
             server_base_url: "http://server:8080/api/v1".into(),
             runner_name: "test".into(),
             problem_types: vec!["uva@1".into()],
+            tags: vec![],
             key_path: "/tmp/identity.key".into(),
             uva_base_url: "https://onlinejudge.org/".into(),
             uhunt_base_url: "https://uhunt.onlinejudge.org/".into(),
@@ -236,6 +264,29 @@ mod tests {
             long_poll_enabled: true,
             lease_seconds: 1200,
         }
+    }
+
+    /// **One spelling, whoever typed it.** The Server matches pools by equality,
+    /// so `Lab-A` here and `lab-a` on an activity would be two pools that read as
+    /// one — and the failure is a queue that never drains with nothing on any
+    /// screen to say why. The Server normalises what it is sent as well; doing it
+    /// here too is what makes the start-up log say what will actually be stored.
+    /// **Through `tags()` itself**, not through a copy of what it does. The first
+    /// version of this restated the pipeline inline, and would have stayed green
+    /// with the lowercasing deleted from the code it was written for.
+    #[test]
+    fn tags_are_lowercased_trimmed_and_emptied_of_blanks() {
+        // Absent is the general pool, which the Server reads as `default`.
+        std::env::remove_var("AJ_Runner__Tags");
+        assert_eq!(tags("Runner__Tags"), Vec::<String>::new());
+
+        std::env::set_var("AJ_Runner__Tags", "  Lab-A , UVA ");
+        assert_eq!(tags("Runner__Tags"), vec!["lab-a", "uva"]);
+
+        std::env::set_var("AJ_Runner__Tags", "lab-a,,lab-b");
+        assert_eq!(tags("Runner__Tags"), vec!["lab-a", "lab-b"]);
+
+        std::env::remove_var("AJ_Runner__Tags");
     }
 
     #[test]

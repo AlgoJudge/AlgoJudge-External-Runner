@@ -83,6 +83,7 @@ int main(){return 0;}
             version: "0".into(),
             public_key: identity.public_key(),
             problem_types: vec!["uva@1".into()],
+            tags: vec![],
             external: true,
             machine: None,
         })

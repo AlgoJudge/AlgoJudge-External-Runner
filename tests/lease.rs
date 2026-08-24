@@ -360,6 +360,7 @@ fn probe_config(site: &str, hunt: &str) -> algojudge_runner_uva::config::Config 
         server_base_url: stack::api(),
         runner_name: "lease-probe".into(),
         problem_types: vec!["uva@1".into()],
+        tags: vec![],
         key_path: std::env::temp_dir()
             .join(format!("lease-probe-{}.key", std::process::id()))
             .to_string_lossy()

@@ -37,7 +37,12 @@ async fn main() -> anyhow::Result<()> {
         config.uva_password.clone(),
     )?;
 
-    tracing::info!(name = %config.runner_name, types = ?config.problem_types, "starting");
+    tracing::info!(
+        name = %config.runner_name,
+        types = ?config.problem_types,
+        tags = ?config.tags,
+        "starting",
+    );
     if config.long_poll_enabled {
         // Said out loud rather than left to be inferred from latency: the flag
         // is accepted, the accelerator behind it is not built, and the interval

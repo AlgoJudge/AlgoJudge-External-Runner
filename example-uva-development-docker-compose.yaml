@@ -1,0 +1,134 @@
+# PostgreSQL, the Server and this Runner, for development and for the tests that
+# need all three.
+#
+#   docker compose -f example-uva-development-docker-compose.yaml up -d --build --wait
+#   AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1 ./x test -- --include-ignored
+#   docker compose -f example-uva-development-docker-compose.yaml down -v
+#
+# **This is the stack the README asked for.** Every integration test here is
+# `#[ignore]`d and needs `AJ_TEST_SERVER`, so CI runs none of them and a
+# regression in lease renewal reddens no pull request — the README named the fix
+# as "a CI step that stands a Server up, the way AlgoJudge-Runner does", and this
+# is that file. It builds the Server from a sibling checkout, so it needs
+# `AlgoJudge-Server` beside this repository.
+#
+# **Not the production stack.** That belongs in `AlgoJudge-Ops` and does not
+# exist yet. Port 8098 rather than 8080 so this can stand beside the Server's own
+# development stack and AlgoJudge-Runner's without either taking the other's
+# port; it is the port this repository's tests and README already name.
+#
+# **Two things this file cannot do for you**, and both stop the queue dead:
+#
+#   1. **Turn external judging on.** The Server ships with it off, and while it
+#      is off no external work is handed out at all — the Runner sees an empty
+#      queue and looks perfectly healthy. It is a row in the database, so it is a
+#      manager's act on a running Server, not a variable here.
+#   2. **Approve this Runner.** A Runner evaluates nothing until an administrator
+#      approves it in the panel. That is the trust decision the whole design
+#      rests on and it is deliberately not automatable.
+#
+# README §"Running it end to end" carries the rest: a problem with
+# `props.uva.problemNumber`, an activity, an opened round, somebody enrolled.
+
+name: algojudge-runner-uva-dev
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    # One level above PGDATA on purpose: PostgreSQL 18 keeps its data in
+    # `/var/lib/postgresql/18/docker`, and mounting the inner path shadows the
+    # version directory the image creates.
+    volumes:
+      - algojudge_uva_dev_db:/var/lib/postgresql
+    environment:
+      POSTGRES_PASSWORD: algojudge
+      POSTGRES_USER: algojudge
+      POSTGRES_DB: algojudge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U algojudge -d algojudge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      # A sibling checkout by default, which is how the workspace is laid out.
+      # Overridable because GitHub Actions cannot check a repository out above
+      # its own workspace.
+      context: ${AJ_SERVER_CONTEXT:-../AlgoJudge-Server}
+      dockerfile: AlgoJudge.Server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${AJ_SERVER_PORT:-8098}:8080"
+    environment:
+      DOTNET_ENVIRONMENT: Development
+      AJ_ConnectionStrings__DbConnectionString: Host=postgres;Database=algojudge;Username=algojudge;Password=algojudge
+      # **Without each of these the Server refuses to start**, and it is right to:
+      # whose word to take for a visitor's address, and where the files of a
+      # product go, are not things to inherit from a default nobody read. `none`
+      # is the full answer for a Server reached directly, which this one is;
+      # `postgres` puts the bytes in the database this stack already runs, which
+      # is the right trade for development and the wrong one for a deployment.
+      AJ_Forwarded__KnownProxies: none
+      AJ_Storage__Stores__objects__Kind: postgres
+      AJ_Admin__Token: ${AJ_ADMIN_TOKEN:-admin-token-development-only}
+
+  uva-runner:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    # **The archive account, and it is not in this file.** `.env` is git-ignored
+    # and is where `AJ_Uva__Username` and `AJ_Uva__Password` live — the same file
+    # `./x` already passes, and passed as a file rather than on a command line
+    # because an argument lands in the shell history and the process list.
+    # `.env.example` lists both and gives neither a value.
+    env_file:
+      - .env
+    environment:
+      # The compose network name, not localhost: this is the Runner's own view of
+      # the Server, and it is a different address from the browser's.
+      AJ_Server__BaseUrl: http://server:8080/api/v1
+      AJ_Runner__Name: uva-runner-dev
+      AJ_Runner__ProblemTypes: uva@1
+      # **Stated here because `.env` is not written for this container.** That
+      # file is `./x`'s environment, and `./x` mounts the source at `/work`, so
+      # the key path in it points inside the source tree — which this image has
+      # no business writing to and, running as `nonroot`, cannot. `environment`
+      # takes precedence over `env_file`, so naming the image's own path here is
+      # what makes the same `.env` serve both.
+      AJ_Runner__KeyPath: /var/lib/algojudge-runner-uva/identity.key
+      # Which pools this Runner belongs to, comma-separated. Left unset it is in
+      # `default`, which is where every untagged activity's work is.
+      #
+      # **Read once.** The Server takes it at the first registration and the
+      # panel owns it from then on, so changing it here later changes nothing: a
+      # restart must not be able to move a Runner into an examination's pool.
+      #
+      # AJ_Runner__Tags: uva
+      #
+      # **The two numbers the Runner checks against each other at start-up**,
+      # rather than letting them disagree and discovering it an hour later. The
+      # lease must outlast a pending submission, or the Server reclaims the job
+      # while the archive is still thinking and the next Runner submits the same
+      # solution again; and the polling interval must fit four times inside the
+      # lease, because a held lease is renewed on the polling cycle. Slowing the
+      # polling to be polite to uHunt slows the renewing with it.
+      AJ_Lease__RequestSeconds: "1200"
+      AJ_Uva__PendingTimeoutSeconds: "900"
+      AJ_Uva__PollMaxSeconds: "60"
+      RUST_LOG: info
+    volumes:
+      # The key is the identity. Losing it costs a re-registration and an
+      # administrator's approval, so it outlives the container.
+      - algojudge_uva_dev_identity:/var/lib/algojudge-runner-uva
+
+volumes:
+  algojudge_uva_dev_db:
+  algojudge_uva_dev_identity:

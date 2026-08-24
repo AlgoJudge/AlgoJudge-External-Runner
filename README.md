@@ -15,6 +15,7 @@ so. This Runner runs no code, has no sandbox, and measures nothing.
 | How long a job is held | seconds to minutes | up to fifteen minutes, waiting |
 | Registers as | `external: false` | **`external: true`** |
 | Trials | measures them | refuses them |
+| Runtime image | `Dockerfile`, distroless | `Dockerfile`, distroless and smaller |
 
 **`external: true` is not a detail.** The Server pairs a problem with a Runner on
 that flag and the problem's own, by equality — so a Runner that forwards and does
@@ -34,6 +35,38 @@ Everything in the suite runs offline. The tests against the archive and uHunt
 drive a recorded stand-in started in process, so **the live archive is never a
 test dependency** — which is why CI needs no services and no secrets.
 
+## Running it in a container
+
+`Dockerfile` builds a static musl binary into `distroless/static`, about 11 MB
+with no shell and no package manager. It is **smaller than the sandboxing
+Runner's on purpose**: that one holds the container runtime's socket and starts
+sibling containers, and this one starts nothing — so there is no socket, no
+cgroups, no scratch directory and no cache. The only state is the identity key,
+in `/var/lib/algojudge-runner-uva`, which is meant to be a volume: losing it
+costs a re-registration and an administrator's approval.
+
+`example-uva-development-docker-compose.yaml` raises PostgreSQL, a Server built
+from the sibling checkout, and this Runner:
+
+    docker compose -f example-uva-development-docker-compose.yaml up -d --build --wait
+    AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1 ./x test -- --include-ignored
+    docker compose -f example-uva-development-docker-compose.yaml down -v
+
+**This is the stack §"Testing" below asks for.** Port 8098 rather than 8080, so
+it stands beside the Server's own development stack and `AlgoJudge-Runner`'s
+without either taking the other's port.
+
+Two things it cannot do for you, and each stops the queue dead with the Runner
+looking perfectly healthy: **turning external judging on** — the Server ships
+with it off and hands out no external work at all while it is — and **approving
+this Runner**, which is the trust decision the whole design rests on.
+
+**`.env` is passed to the container, and it was written for `./x`.** `./x` mounts
+the source at `/work`, so the key path in it points inside the source tree, which
+the image neither should nor — running as `nonroot` — can write. The compose file
+states `AJ_Runner__KeyPath` in `environment:`, which takes precedence, and that
+is what lets one `.env` serve both.
+
 ## Configuration
 
 Every variable is `AJ_`-prefixed, the same convention the Server reads.
@@ -41,6 +74,19 @@ Every variable is `AJ_`-prefixed, the same convention the Server reads.
 git-ignored and is what `./x` passes to the container as a file rather than on a
 command line, because an argument lands in the shell history and the process
 list.
+
+**`AJ_Runner__Tags` names the pools this Runner belongs to**, comma-separated.
+The Server pairs a Runner with work when the two tag lists **share at least one**
+entry, and an empty list on either side means `default` — so naming a pool takes
+this Runner out of the general queue as surely as it puts it into a reserved one.
+`docs/specs/RUNNER_ROUTING.md` in the workspace owns the rule.
+
+**It is a seed, not a setting.** The Server reads it at the **first**
+registration and never again; from then on the operator owns it in the panel.
+It exists so a room of machines is deployed from one file rather than tagged one
+at a time, and it stops there: a Runner that could re-declare its tags on restart
+would put itself into an examination's pool with nobody having approved it.
+Changing the variable later changes nothing, deliberately.
 
 Two numbers are checked against each other at start-up rather than discovered an
 hour later:
@@ -187,5 +233,7 @@ places would tell a participant the two were built by the same compiler.
 
   All of these are `#[ignore]`d and need `AJ_TEST_SERVER`, so **CI runs none of
   them**. A regression in lease renewal will not redden a pull request; somebody
-  has to run it. Closing that needs a CI step that stands a Server up, the way
-  `AlgoJudge-Runner` does for its judging suite.
+  has to run it. **Half of that is now closed**:
+  `example-uva-development-docker-compose.yaml` stands the Server up, so running
+  them is one command rather than an afternoon. What is still owed is the CI step
+  that calls it.
