@@ -1,8 +1,11 @@
 # AlgoJudge-Runner-UVa
 
-A Runner that does not judge anything. It forwards `uva@1` submissions to
-[onlinejudge.org](https://onlinejudge.org), waits for the archive to decide, and
-reports the archive's verdict back to AlgoJudge.
+AlgoJudge is open-source, self-hosted software for programming contests and
+courses, with automatic evaluation of submitted solutions.
+
+This is a Runner that does not judge anything. It forwards `uva@1` submissions
+to [onlinejudge.org](https://onlinejudge.org), waits for the archive to decide,
+and reports the archive's verdict back to AlgoJudge.
 
 **The verdict is somebody else's opinion**, and every screen that shows it says
 so. This Runner runs no code, has no sandbox, and measures nothing.
@@ -52,9 +55,9 @@ from the sibling checkout, and this Runner:
     AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1 ./x test -- --include-ignored
     docker compose -f example-uva-development-docker-compose.yaml down -v
 
-**This is the stack §"Testing" below asks for.** Port 8098 rather than 8080, so
-it stands beside the Server's own development stack and `AlgoJudge-Runner`'s
-without either taking the other's port.
+**This is the stack §"Running it end to end" below asks for.** Port 8098 rather
+than 8080, so it stands beside the Server's own development stack and
+`AlgoJudge-Runner`'s without either taking the other's port.
 
 Two things it cannot do for you, and each stops the queue dead with the Runner
 looking perfectly healthy: **turning external judging on** — the Server ships
@@ -195,7 +198,11 @@ places would tell a participant the two were built by the same compiler.
   The other five are the archive's own form values and are written down below,
   but nobody here has submitted through them, and that distinction is the whole
   of this gap.
-- **Two of four behaviours around the protocol client are covered; two are not.**
+- **Two of five behaviours around the protocol client are covered; three are
+  not.** *Said "two of four … two are not" until 2026-08-30: it was two of four
+  when it was written on 2026-08-23, and a fifth behaviour — the lease asked for
+  being the lease granted — was added to the covered list in the same edit
+  without the count following it. Recounted from the two lists below.*
 
   The conformance cases are often described as owed by this repository, and on
   inspection that is imprecise. Those cases exercise **an implementation of the
