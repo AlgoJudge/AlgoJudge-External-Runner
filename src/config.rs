@@ -72,16 +72,22 @@ pub const DEFAULT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Whether the long-poll accelerator is on when nothing says otherwise.
 ///
-/// **Off, and it defaulted to on until 2026-08-31.** The flag has no trigger
-/// behind it — the accelerator is accepted and not built — and `schedule` reads
-/// it as a promise that verdicts arrive by another route, so it flattens the
-/// interval net to its *ceiling*. Every installation that never set the
-/// variable was therefore asking the archive once a minute instead of three
-/// times, and waiting up to forty seconds longer for each verdict, in exchange
-/// for a promptness nothing was delivering.
+/// **Off, and it defaulted to on until 2026-08-31.** `schedule::interval` can
+/// flatten the polling net to its ceiling on this flag, on the promise that a
+/// verdict will arrive by some route other than asking — and the trigger behind
+/// that promise is not built.
+///
+/// **What the old default actually cost was nothing**, and this said otherwise
+/// until 2026-08-31: it claimed every installation on it had been asking the
+/// archive once a minute instead of three times. `run::cycle` passes
+/// `schedule::interval` a literal `false`, and always has, so the flag has
+/// never reached the scheduler from configuration at all. The default was
+/// misleading rather than harmful, which is still a reason to change it — a
+/// switch that reads as *on* while doing nothing is worse than one that reads
+/// as *off* and does nothing.
 ///
 /// A switch defaults to the behaviour that works. When the trigger is built,
-/// this becomes a decision again.
+/// this becomes a decision again, and `cycle` has to start passing it.
 pub const DEFAULT_LONG_POLL_ENABLED: bool = false;
 
 #[derive(Debug, Clone)]
@@ -604,13 +610,15 @@ mod tests {
     /// the Server grants 3600, and the job is then held fifty seconds past the
     /// lease it really has. The knowledge lived in a test's doc comment and the
     /// guard lived nowhere.
-    /// The default is pinned by what it *does*, not by its own literal.
+    /// The default is pinned by what it *would* do, not by its own literal.
     ///
-    /// `AJ_External__LongPollEnabled` reads as a promise that verdicts arrive
-    /// by some route other than asking, so `schedule` flattens the net to its
-    /// ceiling. Nothing delivers that promise yet — the trigger is not built —
-    /// so an installation that never set the variable polled at the slowest
-    /// rate the configuration allows and waited longer for every verdict.
+    /// **And "would" is exact**: `run::cycle` hands `schedule::interval` a
+    /// literal `false`, so no configured value reaches the scheduler and this
+    /// test observes a path production does not take. It is kept, and named for
+    /// what it guards — the day the trigger is built, `cycle` starts passing
+    /// the flag, and a default of `true` would flatten the net to its ceiling
+    /// the moment it does. The doc comment above said this was already
+    /// happening, which was wrong on both sides of the 2026-08-31 change.
     #[test]
     fn the_accelerator_that_is_not_built_does_not_slow_the_net_down() {
         let min = std::time::Duration::from_secs(20);
