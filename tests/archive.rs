@@ -128,6 +128,57 @@ async fn a_lapsed_session_is_re_established_once_and_not_fifteen_times() {
     assert_eq!(logins, 2, "one sign-in each, not a loop of fifteen");
 }
 
+/// **A refused sign-in is a refused sign-in, and never a submission.**
+///
+/// onlinejudge.org answers a wrong password with 200 and the login page again.
+/// Until 2026-08-31 `sign_in` checked only the status, so that answer set
+/// `signed_in = true` and every job cost two sign-ins and two submissions to
+/// somebody else's account — for ever, under `restart: unless-stopped`, and
+/// reported as a lapsed session so that nothing ever said the password was
+/// wrong.
+///
+/// The assertion that matters is the last one: **no submission was attempted.**
+#[tokio::test]
+async fn a_sign_in_the_archive_refused_never_reaches_a_submission() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOGIN_PAGE))
+        .mount(&server)
+        .await;
+    // The refusal: 200, and the form back.
+    Mock::given(method("POST"))
+        .and(path("/index.php"))
+        .and(query_param("task", "login"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOGIN_PAGE))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/index.php"))
+        .and(query_param("page", "save_submission"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SIGNED_OUT))
+        .mount(&server)
+        .await;
+
+    let refused = site(&server.uri())
+        .submit(100, 1, "int main(){}\n", Duration::from_millis(0))
+        .await
+        .expect_err("a sign-in the archive refused is not a session");
+    let said = refused.to_string();
+    assert!(said.contains("credentials are refused"), "{said}");
+
+    let sent = server.received_requests().await.unwrap();
+    let submits = sent
+        .iter()
+        .filter(|r| r.url.query().is_some_and(|q| q.contains("save_submission")))
+        .count();
+    assert_eq!(
+        submits, 0,
+        "nothing may be submitted under a refused sign-in"
+    );
+}
+
 /// Serialisation is a correctness requirement, not politeness: with one submit
 /// in flight at a time, at most one new row on the account can be ours.
 #[tokio::test]

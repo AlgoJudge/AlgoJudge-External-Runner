@@ -52,6 +52,18 @@ pub fn hidden_fields(page: &str) -> anyhow::Result<Vec<(String, String)>> {
     Ok(fields)
 }
 
+/// Whether this page is still offering the login form.
+///
+/// **The one signal both directions of the session are read from.** Signed out,
+/// `#mod_loginform` is on the page; signed in it is not. `hidden_fields` has
+/// found that form by its id since the beginning and for a different reason, so
+/// this asks the same question with the same parser rather than by looking for
+/// a substring — which is the habit that broke the proof of concept.
+pub fn shows_the_login_form(page: &str) -> bool {
+    let form = Selector::parse("#mod_loginform").expect("a constant selector");
+    Html::parse_document(page).select(&form).next().is_some()
+}
+
 /// The external submission id, out of the redirect the site answers with.
 ///
 /// **This is the correlation key and there is no other.** Element 0 of a uHunt
@@ -151,6 +163,20 @@ impl Site {
     }
 
     /// Establishes the session. **No credential reaches a log line here.**
+    ///
+    /// **A 200 is not a session**, and until 2026-08-31 that was the whole of
+    /// the check. onlinejudge.org answers a refused sign-in with 200 and the
+    /// login page again, so the status said only that a web server answered —
+    /// and the caller set `signed_in = true` on it. A wrong password therefore
+    /// produced a submission POST that landed back on the login form, a retry,
+    /// a second sign-in and a second submission, for **every job, for ever**,
+    /// reported as a lapsed session and never as a credential. That is the
+    /// "thirty requests and a plausible ban" this module's own header claims to
+    /// have been designed against.
+    ///
+    /// The fixtures had modelled the difference since they were written and
+    /// nothing read them: the login stand-in answers a page carrying `logout`,
+    /// and `SIGNED_OUT` in `tests/archive.rs` is `#mod_loginform`.
     async fn sign_in(&self) -> anyhow::Result<()> {
         let page = self.http.get(&self.base).send().await?.text().await?;
         let mut form = hidden_fields(&page)?;
@@ -174,6 +200,27 @@ impl Site {
             anyhow::bail!(
                 "onlinejudge.org answered {} to the sign-in",
                 answer.status()
+            );
+        }
+
+        let page = answer.text().await?;
+        if shows_the_login_form(&page) {
+            bail!(
+                "onlinejudge.org answered the sign-in with the login form again, \
+                 which is what it does when the credentials are refused"
+            );
+        }
+        // **Both signals, and both hard** (decided 2026-08-31). The form's
+        // absence is unambiguous and carries the defect; the word is a string on
+        // somebody else's page, so requiring it means this Runner stops working
+        // the day onlinejudge.org retitles that link — and no fixture here can
+        // predict that day. The trade was taken with that known: a session
+        // wrongly believed in costs submissions to a third party's account, and
+        // refusing to start is the cheaper failure of the two.
+        if !page.to_ascii_lowercase().contains("logout") {
+            bail!(
+                "onlinejudge.org's answer to the sign-in carries no logout link, so \
+                 nothing on it says a session was established"
             );
         }
         Ok(())
@@ -280,6 +327,20 @@ impl Site {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Both directions of the session are read from one page**, with the
+    /// parser rather than a substring: `logout` appears in the prose of a
+    /// signed-in page and could appear in the prose of a signed-out one.
+    #[test]
+    fn the_login_form_is_how_a_signed_out_page_is_known() {
+        assert!(shows_the_login_form(LOGIN_PAGE));
+        assert!(!shows_the_login_form(
+            "<html><body>welcome, robot — <a href=\"/logout\">logout</a></body></html>"
+        ));
+        assert!(!shows_the_login_form(
+            "<html><body>nothing here</body></html>"
+        ));
+    }
 
     /// The shape of the real page, reduced to what is read from it.
     const LOGIN_PAGE: &str = r#"
