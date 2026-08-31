@@ -23,8 +23,7 @@ so. This Runner runs no code, has no sandbox, and measures nothing.
 **`external: true` is not a detail.** The Server pairs a problem with a Runner on
 that flag and the problem's own, by equality — so a Runner that forwards and does
 not say so is handed nothing at all, and from a log that is indistinguishable
-from an empty queue. An end-to-end run lost ten minutes to exactly that before
-the field existed in the protocol.
+from an empty queue.
 
 ## Building and testing
 
@@ -59,10 +58,10 @@ from the sibling checkout, and this Runner:
 than 8080, so it stands beside the Server's own development stack and
 `AlgoJudge-Runner`'s without either taking the other's port.
 
-Two things it cannot do for you, and each stops the queue dead with the Runner
-looking perfectly healthy: **turning external judging on** — the Server ships
-with it off and hands out no external work at all while it is — and **approving
-this Runner**, which is the trust decision the whole design rests on.
+Two things it cannot do for you, and without either the queue stays empty:
+**turning external judging on** — the Server ships with it off and hands out no
+external work while it is — and **approving this Runner**, which is the trust
+decision the whole design rests on.
 
 **`.env` is passed to the container, and it was written for `./x`.** `./x` mounts
 the source at `/work`, so the key path in it points inside the source tree, which
@@ -120,17 +119,12 @@ whoever owns it.
        POST /problems/{id}/versions
            {"statements":[…], "props":{"type":"uva@1","uva":{"problemNumber":100}}}
 
-   **`props` on the version, not `config`** (2026-08-22). It says *which problem
-   this is*, which is a fact about the problem rather than about one activity's
-   use of it — so it is written once at import and every assignment inherits it,
-   instead of the same number being copied wherever the problem is attached.
+   **`props` on the version, not `config`.** It says *which problem this is*,
+   which is a fact about the problem rather than about one activity's use of it,
+   so it is written once at import and every assignment inherits it.
 
-   **Without it this Runner refuses the job before anything leaves**, and says
-   so by name. A problem imported before that date kept its number on the
-   version's `config`, which no longer exists; the message says that too, because
-   the symptom is identical to a problem nobody configured at all.
-
-   There is no language map to write any more: `uva@1` defines its own six.
+   **Without it this Runner refuses the job before anything leaves**, and says so
+   by name. There is no language map to write: `uva@1` defines its own six.
 
 3. **An activity**, a round that has opened, the problem attached, somebody
    enrolled. **Attach after the configuration is right**: the assignment pins the
@@ -160,15 +154,8 @@ question of what a duplicated *accepted* solution does, which nobody has measure
 ## The six languages
 
 What onlinejudge.org offers, and what to call each of them here. **The problem
-type defines this list** (2026-08-22) — it is `src/language.rs`, and this table
-is that file written out.
-
-It was in each problem's configuration until then, so that a language the
-archive adds would be a re-published problem rather than a release of this
-Runner. What that missed is that the list belongs to *the archive*, which every
-`uva@1` problem shares: holding it per problem meant writing the same six
-numbers into every import, and an import that wrote none produced a problem
-nobody could submit to — the failure a live run found on 2026-08-16.
+type defines this list**, because it belongs to the archive rather than to any
+one problem: it is `src/language.rs`, and this table is that file written out.
 
 | Id | Label | The archive's own | № |
 |---|---|---|---|
@@ -190,57 +177,27 @@ the archive's, pinned at the archive's versions: `cpp11-gcc` there is GCC 14 wit
 our flags, and here it is GCC 5.3.0 with UVa's. Showing "C++11 (GCC)" in both
 places would tell a participant the two were built by the same compiler.
 
-## Known gaps
+## Related repositories
 
-- **The long-poll trigger is not built.** The Runner says so at every start.
-  Verdicts arrive on the interval net alone, which is slower but not wrong.
-- **One of the six numbers has been watched work.** `5` is the id seen accepted.
-  The other five are the archive's own form values and are written down below,
-  but nobody here has submitted through them, and that distinction is the whole
-  of this gap.
-- **Two of five behaviours around the protocol client are covered; three are
-  not.** *Said "two of four … two are not" until 2026-08-30: it was two of four
-  when it was written on 2026-08-23, and a fifth behaviour — the lease asked for
-  being the lease granted — was added to the covered list in the same edit
-  without the count following it. Recounted from the two lists below.*
+- [AlgoJudge-Runner](https://github.com/AlgoJudge/AlgoJudge-Runner) — the
+  sandboxing Runner, and the `aj-protocol` crate this one consumes over Git,
+  pinned to a revision in `Cargo.toml`
+- [AlgoJudge-Server](https://github.com/AlgoJudge/AlgoJudge-Server) — jobs,
+  problems, results, and the switch that turns external judging on
+- [AlgoJudge-Ops](https://github.com/AlgoJudge/AlgoJudge-Ops) — the production
+  Compose stack
 
-  The conformance cases are often described as owed by this repository, and on
-  inspection that is imprecise. Those cases exercise **an implementation of the
-  contract**, and this Runner does not have one: it reaches the Server only
-  through `aj-protocol`, the same crate `AlgoJudge-Runner` uses, whose suite
-  already drives that code against a live Server. Porting them here would test
-  the same lines twice.
+## Contributing
 
-  What is worth covering is what this Runner does *around* that client. All of it
-  needs a harness that signs in to a Server, publishes a problem and submits to
-  it — **`tests/stack.rs` is that harness**, added 2026-08-22, and it is a Server
-  session driven the way a person would drive it: a cookie, never a Runner token.
+Open an issue saying what you expected, what happened, and how to reproduce it.
+Or open a pull request against `main`: one subject per pull request, with a note
+on what changes and why.
 
-  Covered:
+By contributing you agree that your work is licensed under the terms below.
 
-  - **lease renewal actually firing** — `tests/lease.rs` holds a job past the
-    deadline it was granted and asks the Server whose it is. It fails when
-    `renew_everything()` is deleted, which it did not until `AlgoJudge-Server`
-    stopped replacing a claimed lease with its own default on the first progress
-    report;
-  - **the lease this Runner asks for is the lease it gets** — `tests/claim_lease.rs`,
-    offline on the wire format and live against a Server, because those two were
-    right and wrong respectively at the same time.
+## License
 
-  Not covered:
+This project is licensed under the MIT License.
+See LICENSE.
 
-  - **a lost lease dropping the job silently** — reporting against a stale lease
-    would overwrite whoever holds it now, and the Server's idempotency would not
-    help, because it keys on the token this Runner no longer has;
-  - **an archive that is unreachable reported as infrastructure rather than as a
-    wrong answer** — the distinction the whole module rests on;
-  - **serialised submission**, which is a correctness requirement here rather
-    than politeness: two in flight at once cannot be told apart on the way back.
-    This one needs the real archive and fresh submissions from the robot account.
-
-  All of these are `#[ignore]`d and need `AJ_TEST_SERVER`, so **CI runs none of
-  them**. A regression in lease renewal will not redden a pull request; somebody
-  has to run it. **Half of that is now closed**:
-  `example-uva-development-docker-compose.yaml` stands the Server up, so running
-  them is one command rather than an afternoon. What is still owed is the CI step
-  that calls it.
+Authors are listed in AUTHORS.txt.
