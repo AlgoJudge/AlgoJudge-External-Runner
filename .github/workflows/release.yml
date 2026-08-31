@@ -1,0 +1,158 @@
+name: Release
+
+# **A tag is the only thing here that publishes anything.** Pushing one is a
+# person's act; nothing that lands on `main` reaches the registry on its own.
+#
+# The convention is `v<major>.<minor>.<patch>`, and a prerelease is
+# `v1.2.3-rc.1`. The `v*` filter is what enforces the prefix — the arithmetic
+# below only strips it.
+#
+# **One image, and the version is the Runner's own.** This repository ships no
+# language images: an external Runner compiles nothing and runs nothing, it
+# forwards. What it carries beside the binary is a cache directory, and the
+# checks below are the two failures that have actually happened here.
+#
+# Written 2026-09-01, when `AlgoJudge-Ops` gained an `external-runner` service.
+# Until then `ci.yml` built this image and pushed it nowhere, and said in its own
+# comment that where it is published was Ops's question to answer. It answered.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  # The one thing in this repository that writes anything outside itself.
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  # **Not cancelled.** A run interrupted between two `docker push` calls leaves
+  # a version half in the registry, which is worse than a duplicate run.
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Publish the external Runner
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The ancestry check below reads history, and a shallow clone has none.
+          fetch-depth: 0
+
+      # A tag on a scratch branch is not a release. This is the cheap half of
+      # the gate; the other half is the CI run on the commit itself, which this
+      # workflow deliberately does not reproduce — a tag points at a commit, and
+      # that commit's own run is the evidence.
+      - name: The tag must be on main
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD || {
+            echo "$GITHUB_REF_NAME does not point at a commit on main" >&2
+            exit 1
+          }
+
+      - name: Work out the version and the tags
+        id: v
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+
+          # Refused rather than guessed at. `+build` metadata is legal semver
+          # and illegal in a Docker tag, so it is caught here rather than
+          # discovered by a push that fails halfway through.
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "$GITHUB_REF_NAME is not v<major>.<minor>.<patch>[-prerelease]" >&2
+            exit 1
+          fi
+
+          case "$version" in
+            # **A prerelease gets its own tag and nothing else.** The point of
+            # one is that somebody has to ask for it by name; `latest` or a
+            # moving major following it would hand it to everybody who did not.
+            *-*) tags="$version" ;;
+            *)   tags="$version ${version%.*} ${version%%.*} latest" ;;
+          esac
+
+          # ghcr rejects a path with a capital letter — `invalid reference
+          # format` — and the owner here is spelled `AlgoJudge`.
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+          echo "Publishing $version as: $tags"
+
+      # `image.source` is not decoration: it is what makes GitHub attach the
+      # package to this repository, so a package page links back to the code
+      # rather than standing on its own. `AlgoJudge-Ops` filters its own image
+      # prune on that label, and a prune filter matches the label exactly.
+      - name: Build
+        run: |
+          # An array rather than a string of flags: one label carries a URL and
+          # another a timestamp, and word-splitting a string is how one of them
+          # eventually arrives as two arguments.
+          labels=(
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
+            --label "org.opencontainers.image.revision=$GITHUB_SHA"
+            --label "org.opencontainers.image.version=${{ steps.v.outputs.version }}"
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          )
+
+          docker build "${labels[@]}" -t algojudge-external-runner:release .
+
+      # **The image has no shell**, so there is exactly one thing that can be run
+      # in it: the Runner. Started with no configuration it refuses and says
+      # which setting is missing, which proves the static binary in a distroless
+      # image actually runs — the failure this catches is a build that produced
+      # something unexecutable.
+      - name: It refuses to start with nothing configured
+        run: |
+          said=$(docker run --rm algojudge-external-runner:release 2>&1 || true)
+          printf '%s\n' "$said" | grep -q 'AJ_Server__BaseUrl is required' || {
+            echo "it did not start and ask for its configuration:" >&2
+            printf '%s\n' "$said" >&2
+            exit 1
+          }
+
+      # **The cache directory, and who owns it.** It was absent from the image
+      # from the first build until 2026-08-31 and nothing could see it: the
+      # refusal above happens before any directory is touched, and the cache is
+      # not written until a job has been claimed — so every claimed job reported
+      # an infrastructure failure with the archive never contacted. A published
+      # image is the worst place to find that out again.
+      #
+      # Read off the exported filesystem rather than by running anything:
+      # `distroless/static` has no shell to ask, which is the point of it.
+      - name: Its two directories are in the image and belong to it
+        run: |
+          docker create --name probe algojudge-external-runner:release >/dev/null
+          listing=$(docker export probe | tar -tvf -)
+          docker rm probe >/dev/null
+
+          for directory in var/cache/algojudge-external-runner/ var/lib/algojudge-external-runner/; do
+            owner=$(printf '%s\n' "$listing" | awk -v d="$directory" '$NF == d { print $2 }')
+            test -n "$owner" || { echo "$directory is not in the image" >&2; exit 1; }
+            test "$owner" = "65532/65532" \
+              || { echo "$directory belongs to $owner, not to nonroot" >&2; exit 1; }
+            echo "$directory owned by $owner"
+          done
+
+      - name: Log in to ghcr.io
+        run: |
+          printf '%s' '${{ github.token }}' \
+            | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      # Pushed last, after the image has been built and both checks have passed.
+      #
+      # **The package this creates is private**, because this repository is, and
+      # nothing here can change that: somebody with access to the organisation's
+      # packages sets it to Public once. `AlgoJudge-Ops/docs/INSTALL.md` counts
+      # it among the packages an installation needs.
+      - name: Push
+        run: |
+          for tag in ${{ steps.v.outputs.tags }}; do
+            docker tag algojudge-external-runner:release \
+              "${{ steps.v.outputs.registry }}/algojudge-external-runner:$tag"
+            docker push "${{ steps.v.outputs.registry }}/algojudge-external-runner:$tag"
+          done

@@ -68,9 +68,9 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
 
-      # Built and not pushed. Where this is published is `AlgoJudge-Ops`'s
-      # question; that repository exists since 2026-08-30 and does not carry
-      # this image yet.
+      # Built and not pushed: publishing is `release.yml`'s, and a tag is the
+      # only thing that triggers it. What this proves is that the Dockerfile
+      # still builds on every commit, months before anybody cuts a release.
       - name: Build
         run: docker build -t algojudge-external-runner:ci .
 
