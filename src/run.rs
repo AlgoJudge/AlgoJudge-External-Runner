@@ -119,8 +119,6 @@ pub struct Runner<J: Judge> {
     pub judge: J,
     pub config: Config,
     pending: Pending,
-    /// Renewal attempts in a row that could not reach the Server.
-    unreachable: u32,
 }
 
 impl<J: Judge> Runner<J> {
@@ -131,7 +129,6 @@ impl<J: Judge> Runner<J> {
             judge,
             config,
             pending: Pending::default(),
-            unreachable: 0,
         }
     }
 
@@ -363,6 +360,7 @@ impl<J: Judge> Runner<J> {
                 language_id: language,
                 sent: Instant::now(),
                 announced: true,
+                unreachable: 0,
                 accepted: setup.accepted,
                 trail: vec![
                     format!("submitted problem {} as language {language}", setup.number),
@@ -484,6 +482,7 @@ impl<J: Judge> Runner<J> {
             .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
             .collect();
         let ceiling = lease::ceiling(self.config.lease_seconds, self.config.external.poll_max);
+        let mut giving_up: Vec<(i64, u32)> = Vec::new();
 
         for (sid, job_id, token) in held {
             // Success is an answer like any other, so it goes through the same
@@ -499,22 +498,46 @@ impl<J: Judge> Runner<J> {
                     Standing::of(&e)
                 }
             };
-            self.unreachable = match standing {
-                Standing::Unreachable => self.unreachable.saturating_add(1),
-                _ => 0,
-            };
+            let consecutive = self
+                .pending
+                .renewal(sid, !matches!(standing, Standing::Unreachable));
 
-            match lease::act(standing, self.unreachable, ceiling) {
+            match lease::act(standing, consecutive, ceiling) {
                 Action::KeepWaiting => {}
                 Action::DropSilently => {
                     tracing::warn!(job = %job_id, "the lease is gone; another Runner has this job");
                     self.pending.take(sid);
                 }
-                Action::GiveUp => {
-                    tracing::error!(job = %job_id, "the Server has been unreachable too long");
-                    self.pending.take(sid);
-                }
+                Action::GiveUp => giving_up.push((sid, consecutive)),
             }
+        }
+
+        // **Collected, and acted on after the loop.** Giving a job up means an
+        // upload, an attach and a report against a Server that has just been
+        // unreachable for the whole ceiling — `send` retries ten times with a
+        // backoff reaching thirty seconds, so one of these can hold this loop
+        // for three and a half minutes. It is worth paying, because the ceiling
+        // is reached while the lease is still valid and the report has a real
+        // chance of landing. It is not worth paying **before** the jobs that are
+        // still fine have been renewed.
+        for (sid, consecutive) in giving_up {
+            let Some(entry) = self.pending.take(sid) else {
+                continue;
+            };
+            tracing::error!(
+                job = %entry.job_id,
+                consecutive,
+                "the Server has been unreachable too long; giving the job up",
+            );
+            let why = format!(
+                "the Server could not be reached for {consecutive} renewal cycles in a row, so \
+                 this Runner stopped holding submission {sid} on {}. The submission is on the \
+                 account and was never collected; a rejudge would send it again",
+                self.judge.name()
+            );
+            let document = self.judge.details_of_failure(&entry, sid, &why);
+            self.attach(&entry, Some(document)).await;
+            self.fail(&entry.job_id, &entry.lease_token, &why).await;
         }
     }
 

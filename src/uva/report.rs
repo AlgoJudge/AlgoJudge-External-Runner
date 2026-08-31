@@ -104,6 +104,7 @@ mod tests {
             language_id: 1,
             sent: Instant::now(),
             announced: true,
+            unreachable: 0,
             accepted: vec!["AC".to_owned()],
             trail: vec![
                 "submitted problem 100 as language 1".into(),
