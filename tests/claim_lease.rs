@@ -106,7 +106,9 @@ int main(){return 0;}
     let granted = chrono_seconds_until(&job.lease_expires_at);
     assert!(
         granted < f64::from(asked) + 15.0,
-        "asked for a {asked}s lease and was granted {granted:.0}s. The Server          applies its own default when it reads none, so every lease this Runner          computes with is a fiction and renewal is the only thing holding a job."
+        "asked for a {asked}s lease and was granted {granted:.0}s. The Server \
+         applies its own default when it reads none, so every lease this Runner \
+         computes with is a fiction and renewal is the only thing holding a job."
     );
 }
 

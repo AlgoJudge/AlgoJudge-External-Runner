@@ -47,7 +47,10 @@ pub fn read(
 ) -> anyhow::Result<Setup> {
     let identity = identity.ok_or_else(|| {
         anyhow::anyhow!(
-            "this problem version carries no props, so there is no UVa problem number to              submit to. A problem imported before 2026-08-22 kept its number on the version's              `config`, which no longer exists; set `props` to              {{\"type\":\"uva@1\",\"uva\":{{\"problemNumber\":N}}}} on the version."
+            "this problem version carries no props, so there is no UVa problem number \
+             to submit to. A problem imported before 2026-08-22 kept its number on the \
+             version's `config`, which no longer exists; set `props` to \
+             {{\"type\":\"uva@1\",\"uva\":{{\"problemNumber\":N}}}} on the version."
         )
     })?;
     let identity: Identity = serde_json::from_value(identity.clone())
@@ -82,6 +85,24 @@ pub fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **This message had its line breaks collapsed into runs of fourteen
+    /// spaces**, and it is what a manager reads when a problem version carries
+    /// no number — the one sentence telling them what to set and where.
+    ///
+    /// Four literals in this repository were in that state. Nothing could catch
+    /// it: `rustfmt` does not look inside a string and `clippy` has no opinion
+    /// about one, so the guard is a test on the value rather than on the source.
+    #[test]
+    fn the_message_about_a_missing_number_reads_as_a_sentence() {
+        let refused = read(None, None).unwrap_err().to_string();
+
+        assert!(refused.contains("problemNumber"), "{refused}");
+        assert!(
+            !refused.contains("  "),
+            "a run of spaces survived a collapsed line break: {refused}"
+        );
+    }
 
     fn document(text: &str) -> Option<serde_json::Value> {
         Some(serde_json::from_str(text).unwrap())

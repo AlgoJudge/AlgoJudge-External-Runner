@@ -96,13 +96,16 @@ async fn archive(server: &MockServer, sid: i64) {
         // lapsed session, because that is what an archive that took nothing
         // usually means. The shape is the one captured from the live archive on
         // 2026-08-16 and asserted in `site.rs`'s own unit test.
-        .respond_with(ResponseTemplate::new(302).insert_header(
-            "location",
-            format!(
-                "/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem                 &category=&mosmsg=Submission+received+with+ID+{sid}"
-            )
-            .as_str(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header(
+                "location",
+                format!(
+                    "/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem\
+                 &category=&mosmsg=Submission+received+with+ID+{sid}"
+                )
+                .as_str(),
+            ),
+        )
         .mount(server)
         .await;
 }
@@ -325,7 +328,8 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
         // nothing but two minutes.
         assert!(
             state != "failed" && state != "finished",
-            "the job settled as {state} after {}s instead of being held —              the Runner's log above says why: {seen}",
+            "the job settled as {state} after {}s instead of being held — \
+             the Runner's log above says why: {seen}",
             holding.elapsed().as_secs(),
         );
 
