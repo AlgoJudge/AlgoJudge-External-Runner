@@ -93,8 +93,17 @@ services:
     # same file `./x` already passes, and passed as a file rather than on a
     # command line because an argument lands in the shell history and the process
     # list. `.env.example` lists both and gives neither a value.
+    #
+    # **`required: false`, so a checkout with no `.env` still comes up.** It was
+    # a bare `- .env` until 2026-08-31, and Compose treats a missing env file as
+    # a hard error: the whole stack — Postgres and the Server with it — refused
+    # to start, naming a file the repository deliberately does not ship. That is
+    # the first command in this file's own header, on a fresh clone. Without the
+    # file the Runner starts and fails to sign in, which is a Runner's log rather
+    # than a stack that will not stand up. Needs Compose v2.24 or newer.
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       # The compose network name, not localhost: this is the Runner's own view of
       # the Server, and it is a different address from the browser's.
