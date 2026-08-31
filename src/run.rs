@@ -17,9 +17,25 @@ use aj_protocol::wire::{AttachToJob, ClaimedJob, Register, ReportResult};
 use aj_protocol::{Backoff, Cache, Identity, Server};
 
 use crate::config::Config;
-use crate::integration::{Chosen, Judge, Outcome, Refused};
+use crate::integration::{Chosen, Judge, Outcome, Refused, Setup};
 use crate::lease::{self, Action, Standing};
 use crate::pending::{Entry, Matched, Pending};
+
+/// Why a claimed job never reaches the judge, and **whose fault that is**.
+///
+/// The distinction used to live in two places and they disagreed: one reader
+/// decided whether a refusal was a verdict, another decided what to submit, and
+/// the second one's answer for the same condition was an infrastructure failure.
+/// One reader cannot disagree with itself.
+enum Blocked {
+    /// The activity's own rules refuse it. **A verdict, not a failure**: the
+    /// participant chose it, their code may be perfect, and what they broke is a
+    /// rule of the activity — the same answer `standard-io@1` gives.
+    Verdict(String),
+    /// The platform cannot forward it. An infrastructure failure, and the
+    /// submission stays rejudgeable.
+    Failure(String),
+}
 
 /// What the Server records this Runner as being.
 ///
@@ -31,7 +47,13 @@ pub const PRODUCT: &str = "algojudge-external-runner";
 ///
 /// The judge's own type unless an operator narrowed or widened it with
 /// `AJ_Runner__ProblemTypes`.
-fn declared<J: Judge>(config: &Config, judge: &J) -> Vec<String> {
+///
+/// **Public because `main` logs it and `admitted` sends it.** `main` restated
+/// this body token for token rather than calling it — a separate crate cannot
+/// reach a private function — so the two could drift, and the drift's shape is
+/// the invisible one: a start-up line telling an operator the Runner declares
+/// one thing while the registration says another, and a queue that never drains.
+pub fn declared<J: Judge>(config: &Config, judge: &J) -> Vec<String> {
     if config.problem_types.is_empty() {
         vec![judge.problem_type().to_owned()]
     } else {
@@ -103,8 +125,6 @@ pub struct Runner<J: Judge> {
     pub judge: J,
     pub config: Config,
     pending: Pending,
-    /// Renewal attempts in a row that could not reach the Server.
-    unreachable: u32,
 }
 
 impl<J: Judge> Runner<J> {
@@ -115,7 +135,6 @@ impl<J: Judge> Runner<J> {
             judge,
             config,
             pending: Pending::default(),
-            unreachable: 0,
         }
     }
 
@@ -212,17 +231,25 @@ impl<J: Judge> Runner<J> {
         // is a rule of the activity. Two problem types answering this
         // differently would make the verdict a property of who judged rather
         // than of what happened.
-        if let Err(refusal) = self.allowed(&job) {
-            tracing::info!(job = %job.job_id, %refusal, "refused by the activity's rules");
-            self.send(
-                &job.job_id,
-                &ReportResult::judged(&token, 0.0, 1.0, crate::integration::POLICY_VIOLATION),
-            )
-            .await;
-            return;
-        }
+        let (setup, language) = match self.prepare(&job) {
+            Ok(prepared) => prepared,
+            Err(Blocked::Verdict(refusal)) => {
+                tracing::info!(job = %job.job_id, %refusal, "refused by the activity's rules");
+                self.send(
+                    &job.job_id,
+                    &ReportResult::judged(&token, 0.0, 1.0, crate::integration::POLICY_VIOLATION),
+                )
+                .await;
+                return;
+            }
+            Err(Blocked::Failure(why)) => {
+                tracing::warn!(job = %job.job_id, %why, "not forwarded");
+                self.fail(&job.job_id, &token, &why).await;
+                return;
+            }
+        };
 
-        match self.forward(&job).await {
+        match self.forward(&job, setup, language).await {
             Ok(entry) => {
                 if let Err(e) = self.server.progress(&job.job_id, &token).await {
                     tracing::warn!(%e, "could not say the work had started");
@@ -242,50 +269,55 @@ impl<J: Judge> Runner<J> {
         }
     }
 
-    /// Whether this submission may be sent at all.
+    /// Everything a job has to say before anything leaves the installation.
     ///
-    /// Read from the same two documents `forward` reads, and deliberately
-    /// before it: a refusal here leaves nothing on somebody else's judge.
-    fn allowed(&self, job: &ClaimedJob) -> Result<(), String> {
-        // Not this check's business. `forward` reports an unreadable
-        // configuration as the infrastructure failure it is, with the message
-        // that names the missing field.
-        let Ok(setup) = self
-            .judge
-            .read(job.problem_version_props.as_ref(), job.config.as_ref())
-        else {
-            return Ok(());
-        };
-
-        match self.judge.language(&setup, language_of(job.props.as_ref())) {
-            Chosen::NotAllowed { wanted, allowed } => Err(format!(
-                "this problem does not accept {wanted} here; it accepts {allowed:?}"
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    async fn forward(&mut self, job: &ClaimedJob) -> anyhow::Result<(i64, Entry)> {
+    /// **One reader, because two disagreed about the same rule.** `allowed`
+    /// read the two documents and answered the language question to decide
+    /// whether a refusal was a verdict; `forward` read the same two documents
+    /// and asked the same question again to decide what to submit — four
+    /// `serde_json::from_value` over cloned documents per job. `forward`'s own
+    /// `NotAllowed` arm carried the comment *"reaching here would mean the two
+    /// disagreed about the same rule"*, and it was unreachable by construction
+    /// while turning that state into an infrastructure failure — the opposite
+    /// of the answer the identical condition earned twenty lines earlier.
+    ///
+    /// Two constraints the collapse had to preserve, and does. An unreadable
+    /// configuration is reported **once**, with the message that names the
+    /// missing field — `allowed` swallowed that error precisely because
+    /// `forward` owned the message. And `NotSubmittable` stays a `Failure`: the
+    /// participant chose from a list the platform gave them, so it is the
+    /// platform's fault and the submission stays rejudgeable.
+    ///
+    /// `props.language`, since 2026-08-22. The Server carries the document
+    /// without reading a member of it, so which member names the language is
+    /// the problem type's to know — and an external type calls it the same
+    /// thing `standard-io@1` does.
+    fn prepare(&self, job: &ClaimedJob) -> Result<(Setup, i64), Blocked> {
         // Two documents, two questions: the version says which problem, the
         // assignment says how this course counts it.
         let setup = self
             .judge
-            .read(job.problem_version_props.as_ref(), job.config.as_ref())?;
+            .read(job.problem_version_props.as_ref(), job.config.as_ref())
+            .map_err(|e| Blocked::Failure(e.to_string()))?;
 
-        // `props.language`, since 2026-08-22. The Server carries the document
-        // without reading a member of it, so which member names the language is
-        // the problem type's to know — and an external type calls it the same
-        // thing `standard-io@1` does.
         let language = match self.judge.language(&setup, language_of(job.props.as_ref())) {
             Chosen::Accepted(number) => number,
-            // Refused before this by `allowed`, which reports it as a verdict.
-            // Reaching here would mean the two disagreed about the same rule.
             Chosen::NotAllowed { wanted, allowed } => {
-                anyhow::bail!("{wanted} is not accepted here; the activity allows {allowed:?}")
+                return Err(Blocked::Verdict(format!(
+                    "this problem does not accept {wanted} here; it accepts {allowed:?}"
+                )))
             }
-            Chosen::NotSubmittable(why) => anyhow::bail!(why),
+            Chosen::NotSubmittable(why) => return Err(Blocked::Failure(why)),
         };
+        Ok((setup, language))
+    }
 
+    async fn forward(
+        &mut self,
+        job: &ClaimedJob,
+        setup: Setup,
+        language: i64,
+    ) -> anyhow::Result<(i64, Entry)> {
         let pid = self.judge.problem(setup.number).await?;
 
         let submitted = job
@@ -315,6 +347,12 @@ impl<J: Judge> Runner<J> {
             // operator reading a failed submission needs.
             .map_err(|refused| match refused {
                 Refused::SessionLapsed => anyhow::anyhow!("the {name} session had lapsed"),
+                Refused::AcceptedWithoutAnId => anyhow::anyhow!(
+                    "{name} received the submission and did not say which id it gave it. \
+                     It is on the account and cannot be matched to this job — look at the \
+                     account before rejudging, or the participant gets two rows for one \
+                     attempt"
+                ),
                 Refused::Site(why) => anyhow::anyhow!("{name} refused the submission: {why}"),
             })?;
 
@@ -325,9 +363,8 @@ impl<J: Judge> Runner<J> {
                 lease_token: job.lease_token.clone(),
                 problem_number: setup.number,
                 pid,
-                language_id: language,
                 sent: Instant::now(),
-                announced: true,
+                unreachable: 0,
                 accepted: setup.accepted,
                 trail: vec![
                     format!("submitted problem {} as language {language}", setup.number),
@@ -396,17 +433,19 @@ impl<J: Judge> Runner<J> {
                     ));
                 }
                 Outcome::Failed { reason, permanent } => {
+                    // The distinction goes to the Server, not only to this
+                    // Runner's stderr — see `integration::failure_reason`.
+                    let why = crate::integration::failure_reason(reason, permanent);
                     if permanent {
-                        tracing::error!(
-                            problem = entry.problem_number,
-                            "{reason}; this will not be retried"
-                        );
+                        tracing::error!(problem = entry.problem_number, "{why}");
+                    } else {
+                        tracing::warn!(problem = entry.problem_number, "{why}");
                     }
-                    let document = self.judge.details_of_failure(&entry, id, reason);
+                    let document = self.judge.details_of_failure(&entry, id, &why);
                     done.push((
                         id,
                         Some(document),
-                        ReportResult::failed(&entry.lease_token, reason),
+                        ReportResult::failed(&entry.lease_token, &why),
                     ));
                 }
             }
@@ -447,6 +486,7 @@ impl<J: Judge> Runner<J> {
             .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
             .collect();
         let ceiling = lease::ceiling(self.config.lease_seconds, self.config.external.poll_max);
+        let mut giving_up: Vec<(i64, u32)> = Vec::new();
 
         for (sid, job_id, token) in held {
             // Success is an answer like any other, so it goes through the same
@@ -462,22 +502,46 @@ impl<J: Judge> Runner<J> {
                     Standing::of(&e)
                 }
             };
-            self.unreachable = match standing {
-                Standing::Unreachable => self.unreachable.saturating_add(1),
-                _ => 0,
-            };
+            let consecutive = self
+                .pending
+                .renewal(sid, !matches!(standing, Standing::Unreachable));
 
-            match lease::act(standing, self.unreachable, ceiling) {
+            match lease::act(standing, consecutive, ceiling) {
                 Action::KeepWaiting => {}
                 Action::DropSilently => {
                     tracing::warn!(job = %job_id, "the lease is gone; another Runner has this job");
                     self.pending.take(sid);
                 }
-                Action::GiveUp => {
-                    tracing::error!(job = %job_id, "the Server has been unreachable too long");
-                    self.pending.take(sid);
-                }
+                Action::GiveUp => giving_up.push((sid, consecutive)),
             }
+        }
+
+        // **Collected, and acted on after the loop.** Giving a job up means an
+        // upload, an attach and a report against a Server that has just been
+        // unreachable for the whole ceiling — `send` retries ten times with a
+        // backoff reaching thirty seconds, so one of these can hold this loop
+        // for three and a half minutes. It is worth paying, because the ceiling
+        // is reached while the lease is still valid and the report has a real
+        // chance of landing. It is not worth paying **before** the jobs that are
+        // still fine have been renewed.
+        for (sid, consecutive) in giving_up {
+            let Some(entry) = self.pending.take(sid) else {
+                continue;
+            };
+            tracing::error!(
+                job = %entry.job_id,
+                consecutive,
+                "the Server has been unreachable too long; giving the job up",
+            );
+            let why = format!(
+                "the Server could not be reached for {consecutive} renewal cycles in a row, so \
+                 this Runner stopped holding submission {sid} on {}. The submission is on the \
+                 account and was never collected; a rejudge would send it again",
+                self.judge.name()
+            );
+            let document = self.judge.details_of_failure(&entry, sid, &why);
+            self.attach(&entry, Some(document)).await;
+            self.fail(&entry.job_id, &entry.lease_token, &why).await;
         }
     }
 

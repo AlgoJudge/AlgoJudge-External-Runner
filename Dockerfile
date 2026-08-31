@@ -40,12 +40,19 @@ COPY src src
 RUN find src -name '*.rs' -exec touch {} + \
     && cargo build --release --target x86_64-unknown-linux-musl
 
-# The one directory this Runner writes to, created here so that a **named volume
-# mounted over it inherits this ownership**. Docker seeds an empty volume from
-# the image path, and a directory that does not exist in the image gives a volume
-# owned by root — which a `nonroot` process cannot write, and which fails at the
-# first thing the Runner does, generating its key.
-RUN mkdir -p /state/lib
+# The two directories this Runner writes to, created here so that a **named
+# volume mounted over either one inherits this ownership**. Docker seeds an empty
+# volume from the image path, and a directory that does not exist in the image
+# gives a volume owned by root — which a `nonroot` process cannot write.
+#
+# **The cache half was missing until 2026-08-31, and it broke every job.** The
+# identity directory was here from the beginning because losing it is visible at
+# once: the Runner cannot generate its key and does not start. The cache is not
+# written until a job has been claimed, so its absence failed later and looked
+# like something else — `create_dir_all` under a root-owned `/var` returns
+# `EACCES`, the fetch of the participant's own source fails, and the job is
+# reported as an infrastructure failure with the archive never contacted.
+RUN mkdir -p /state/lib /state/cache
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
@@ -53,12 +60,22 @@ COPY --from=build \
     /src/target/x86_64-unknown-linux-musl/release/algojudge-external-runner \
     /usr/local/bin/algojudge-external-runner
 
-COPY --from=build --chown=65532:65532 /state/lib /var/lib/algojudge-external-runner
+COPY --from=build --chown=65532:65532 /state/lib   /var/lib/algojudge-external-runner
+COPY --from=build --chown=65532:65532 /state/cache /var/cache/algojudge-external-runner
 
-# The identity is the only state there is, and it is meant to be a volume: losing
-# it costs a re-registration and an administrator's approval. There is no package
-# cache here — this Runner downloads no packages, because it evaluates nothing.
-ENV AJ_Runner__KeyPath=/var/lib/algojudge-external-runner/identity.key
+# The identity is the state worth keeping, and it is meant to be a volume: losing
+# it costs a re-registration and an administrator's approval. The cache is not —
+# losing it costs one download.
+#
+# **There is no *package* cache here, and this said there was no cache at all.**
+# The narrower sentence is the true one: an external problem has no package, so
+# nothing is ever downloaded for a problem. The participant's own source is, on
+# every job, through the protocol crate's cache and with its checksum verified —
+# and it needs somewhere to live. Both paths are stated here rather than left to
+# agree with a constant in the binary, which is how the second one came to be
+# absent from the image for a fortnight.
+ENV AJ_Runner__KeyPath=/var/lib/algojudge-external-runner/identity.key \
+    AJ_Cache__Path=/var/cache/algojudge-external-runner
 
 # No port is published and none is listened on. This Runner dials out twice — to
 # the Server and to the judging system — and accepts nothing.

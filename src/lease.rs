@@ -74,7 +74,22 @@ pub enum Action {
     /// idempotency would not save us: it keys on the lease token, and ours is
     /// the stale one.
     DropSilently,
-    /// Stop holding it and say why. The Server requeues it.
+    /// Stop holding it **and say why**.
+    ///
+    /// **Implemented as `DropSilently` with a louder log until 2026-08-31**, so
+    /// the "say why" never happened: the submission stayed live on the judge,
+    /// this Runner forgot it, and the Server's reaper eventually handed the job
+    /// to somebody who submitted the same solution again — the failure the whole
+    /// of this module exists to prevent.
+    ///
+    /// **And the Server does not requeue it**, which this said. A report with
+    /// `infrastructureFailure` puts the job in `failed` (`RunnerService`, read
+    /// 2026-08-31) and nothing takes it back out; a rejudge is a person's
+    /// decision, which is the right one to leave to a person when the
+    /// submission is already sitting on somebody else's account. What it must
+    /// not be is `DropSilently` — that is for a job another Runner already
+    /// holds, and dropping this one in silence leaves a participant watching a
+    /// submission that exists nowhere.
     GiveUp,
 }
 

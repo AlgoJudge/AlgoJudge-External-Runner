@@ -2,10 +2,15 @@
 #
 # cargo, in a pinned container.
 #
-# Rust is not a prerequisite for working on this repository. The Runner targets
-# `linux/amd64` with cgroup v2 and a container runtime socket, so a native build
-# on a developer's machine would exercise the parts that do not matter and skip
-# the parts that do. Building where it runs is the cheaper habit.
+# Rust is not a prerequisite for working on this repository. Building where it
+# ships is the cheaper habit: one pinned compiler, and a `target/` nobody has to
+# reconcile between a Windows host and a Linux image.
+#
+# **This said the Runner targets `linux/amd64` with cgroup v2 and a container
+# runtime socket** until 2026-08-31, which is `AlgoJudge-Runner`'s reason and
+# not this one's. This Runner executes nothing: it forwards a submission to
+# somebody else's judge and reads the verdict back, so there is no sandbox here,
+# no cgroup and no runtime socket to hand it.
 #
 # The image is pinned **by digest**, not by tag: a tag is a moving name and two
 # people running `./x build` a month apart would compile against two compilers
@@ -126,7 +131,6 @@ run() {
         -e AJ_Runner__ProblemTypes \
         -e AJ_TEST_SERVER \
         -e AJ_ADMIN_TOKEN \
-        -e AJ_SANDBOX_ALLOW_CGROUP_V1 \
         -e RUST_LOG \
         -e "AJ_HOST_WORKDIR=$HOST_DIR" \
         $HOST_ALIAS \

@@ -73,9 +73,15 @@ dependency** — which is why CI needs no services and no secrets.
 with no shell and no package manager. It is **smaller than the sandboxing
 Runner's on purpose**: that one holds the container runtime's socket and starts
 sibling containers, and this one starts nothing — so there is no socket, no
-cgroups, no scratch directory and no cache. The only state is the identity key,
-in `/var/lib/algojudge-external-runner`, which is meant to be a volume: losing it
-costs a re-registration and an administrator's approval.
+cgroups and no scratch directory.
+
+Two directories, and the difference between them matters. The identity key is in
+`/var/lib/algojudge-external-runner` and is meant to be a volume: losing it costs
+a re-registration and an administrator's approval. A submission's source is
+cached in `/var/cache/algojudge-external-runner` (`AJ_Cache__Path`), and losing
+that costs one download. **There is no *package* cache** — an external problem
+has none, because its whole configuration travels on the job — which is not the
+same as there being no cache, and this said the second thing until 2026-08-31.
 
 `example-development-docker-compose.yaml` raises PostgreSQL, a Server built from
 the sibling checkout, and this Runner:

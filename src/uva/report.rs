@@ -101,9 +101,8 @@ mod tests {
             lease_token: "token".into(),
             problem_number: 100,
             pid: 36,
-            language_id: 1,
             sent: Instant::now(),
-            announced: true,
+            unreachable: 0,
             accepted: vec!["AC".to_owned()],
             trail: vec![
                 "submitted problem 100 as language 1".into(),

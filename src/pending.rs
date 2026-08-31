@@ -24,12 +24,21 @@ pub struct Entry {
     /// The judge's **internal** id for the problem, for verifying an answer
     /// belongs to this entry.
     pub pid: i64,
-    pub language_id: i64,
     /// When the archive accepted it. The timeout runs from here, not from the
     /// claim: waiting starts when the submission exists.
     pub sent: Instant,
-    /// Whether the Server has been told the work is running.
-    pub announced: bool,
+    /// Renewal cycles in a row whose answer could not reach the Server, **for
+    /// this job**.
+    ///
+    /// **Per job, because `lease::ceiling` counts cycles and the decision is per
+    /// job.** One counter on the `Runner` was wrong in both directions at once.
+    /// It was incremented inside the loop over held jobs, so a single
+    /// unreachable cycle with twenty outstanding spent nineteen cycles of budget
+    /// in one pass and gave two of them up with the lease twenty minutes from
+    /// expiring. And it was reset to zero by any renewal that succeeded, so a
+    /// Server that would renew nineteen jobs and not the twentieth never reached
+    /// the ceiling at all — which is the partial outage `GiveUp` exists for.
+    pub unreachable: u32,
     /// Which verdicts count as solved for **this** assignment, carried from the
     /// configuration chain so a later poll needs no second read of it.
     pub accepted: Vec<String>,
@@ -72,6 +81,25 @@ impl Pending {
 
     pub fn insert(&mut self, sid: i64, entry: Entry) {
         self.entries.insert(sid, entry);
+    }
+
+    /// One renewal answer, recorded against the job it was about.
+    ///
+    /// Answers how many cycles in a row **this** job's renewal has failed to
+    /// reach the Server, this one included, or zero when it did.
+    ///
+    /// `reached` rather than a `Standing`, so this module still names neither a
+    /// judging system nor a lease protocol.
+    pub fn renewal(&mut self, sid: i64, reached: bool) -> u32 {
+        let Some(entry) = self.entries.get_mut(&sid) else {
+            return 0;
+        };
+        entry.unreachable = if reached {
+            0
+        } else {
+            entry.unreachable.saturating_add(1)
+        };
+        entry.unreachable
     }
 
     pub fn take(&mut self, sid: i64) -> Option<Entry> {
@@ -137,12 +165,50 @@ mod tests {
             lease_token: "token".into(),
             problem_number: 100,
             pid,
-            language_id: 1,
             sent,
-            announced: false,
+            unreachable: 0,
             accepted: vec!["AC".to_owned()],
             trail: Vec::new(),
         }
+    }
+
+    /// **The too-eager half.** One counter on the Runner was incremented inside
+    /// the loop over held jobs, so a single unreachable cycle with twenty
+    /// outstanding walked it to nineteen — the whole ceiling — and gave two
+    /// jobs up with the lease twenty minutes from expiring.
+    #[test]
+    fn a_failed_renewal_is_counted_against_its_own_job_and_no_other() {
+        let mut pending = Pending::default();
+        for sid in 1..=20 {
+            pending.insert(sid, entry(36, Instant::now()));
+        }
+
+        // One cycle in which every renewal failed to reach the Server.
+        for sid in 1..=20 {
+            assert_eq!(pending.renewal(sid, false), 1, "job {sid}");
+        }
+    }
+
+    /// **The too-lazy half, and the one that made `GiveUp` unreachable.** The
+    /// counter was reset by *any* renewal that succeeded, so a Server that would
+    /// renew one job and not the other never reached the ceiling at all — which
+    /// is the partial outage the give-up was written for.
+    #[test]
+    fn a_job_the_server_will_not_renew_reaches_the_ceiling_while_others_are_renewed() {
+        let mut pending = Pending::default();
+        pending.insert(1, entry(36, Instant::now()));
+        pending.insert(2, entry(36, Instant::now()));
+
+        let mut stubborn = 0;
+        for _ in 0..5 {
+            stubborn = pending.renewal(1, false);
+            assert_eq!(
+                pending.renewal(2, true),
+                0,
+                "the one that renews is at zero"
+            );
+        }
+        assert_eq!(stubborn, 5, "five cycles in a row, counted");
     }
 
     /// The account is shared. Somebody signing in by hand must not break a poll.

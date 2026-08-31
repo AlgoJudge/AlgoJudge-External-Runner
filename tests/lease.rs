@@ -96,13 +96,16 @@ async fn archive(server: &MockServer, sid: i64) {
         // lapsed session, because that is what an archive that took nothing
         // usually means. The shape is the one captured from the live archive on
         // 2026-08-16 and asserted in `site.rs`'s own unit test.
-        .respond_with(ResponseTemplate::new(302).insert_header(
-            "location",
-            format!(
-                "/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem                 &category=&mosmsg=Submission+received+with+ID+{sid}"
-            )
-            .as_str(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header(
+                "location",
+                format!(
+                    "/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem\
+                 &category=&mosmsg=Submission+received+with+ID+{sid}"
+                )
+                .as_str(),
+            ),
+        )
         .mount(server)
         .await;
 }
@@ -227,8 +230,10 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
     approving.abort();
     let _ = approving.await;
 
+    // From the configuration, like the binary does, rather than beside it: two
+    // places naming one directory is how the image came to ship without it.
     let cache = Arc::new(aj_protocol::Cache::new(
-        std::env::temp_dir().join("lease-probe-cache"),
+        std::path::PathBuf::from(&config.cache_path),
         64 * 1024 * 1024,
     ));
     let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
@@ -323,7 +328,8 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
         // nothing but two minutes.
         assert!(
             state != "failed" && state != "finished",
-            "the job settled as {state} after {}s instead of being held —              the Runner's log above says why: {seen}",
+            "the job settled as {state} after {}s instead of being held — \
+             the Runner's log above says why: {seen}",
             holding.elapsed().as_secs(),
         );
 
@@ -345,6 +351,10 @@ fn probe_config(site: &str, hunt: &str) -> algojudge_external_runner::config::Co
         tags: vec![],
         key_path: std::env::temp_dir()
             .join(format!("lease-probe-{}.key", std::process::id()))
+            .to_string_lossy()
+            .into_owned(),
+        cache_path: std::env::temp_dir()
+            .join("lease-probe-cache")
             .to_string_lossy()
             .into_owned(),
         lease_seconds: 80,

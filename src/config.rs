@@ -28,11 +28,46 @@ use anyhow::{bail, Context};
 /// all — onlinejudge.org does not (searched 2026-08-13, nothing found).
 pub const POLL_FLOOR_SECONDS: u64 = 20;
 
+/// The longest lease the Server will grant, whatever is asked for.
+///
+/// **Not this Runner's choice.** `RunnerService` clamps `leaseSeconds` to
+/// `[60, 3600]` on both the claim and the renewal, and `aj-protocol` says so at
+/// `ClaimedJob::lease_expires_at`: *the granted deadline is authoritative, and a
+/// Runner that renews on its own arithmetic renews on a number the Server never
+/// agreed to*. Read off `AlgoJudge-Server` on 2026-08-31.
+pub const SERVER_LEASE_CEILING_SECONDS: u32 = 3600;
+
 /// The judge served when nothing says otherwise.
 ///
 /// **The only one there is.** A second is a module beside `crate::uva` and an
 /// arm in `main`, not a fork.
 pub const DEFAULT_JUDGE: &str = "uva";
+
+/// Where the source cache lives when nothing says otherwise.
+///
+/// **`AJ_Cache__Path` is the name the sandboxing Runner already reads**, so an
+/// operator writing one Compose file for both does not have to remember which
+/// of the two spells it which way.
+///
+/// It was hard-coded in `main` until 2026-08-31, which is half of why the image
+/// shipped without the directory: nothing in the repository could name the path,
+/// so `.env.example` could not list it and the `Dockerfile` had to agree with a
+/// constant it could not see.
+pub const DEFAULT_CACHE_PATH: &str = "/var/cache/algojudge-external-runner";
+
+/// Whether the long-poll accelerator is on when nothing says otherwise.
+///
+/// **Off, and it defaulted to on until 2026-08-31.** The flag has no trigger
+/// behind it — the accelerator is accepted and not built — and `schedule` reads
+/// it as a promise that verdicts arrive by another route, so it flattens the
+/// interval net to its *ceiling*. Every installation that never set the
+/// variable was therefore asking the archive once a minute instead of three
+/// times, and waiting up to forty seconds longer for each verdict, in exchange
+/// for a promptness nothing was delivering.
+///
+/// A switch defaults to the behaviour that works. When the trigger is built,
+/// this becomes a decision again.
+pub const DEFAULT_LONG_POLL_ENABLED: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -60,6 +95,16 @@ pub struct Config {
     /// examination's pool.
     pub tags: Vec<String>,
     pub key_path: String,
+
+    /// Where a submission's source is cached on its way to the judge.
+    ///
+    /// **There is no package cache and there is a source cache**, and conflating
+    /// the two cost every job in the shipped image until 2026-08-31. An external
+    /// problem has no package — its whole configuration travels on the job — so
+    /// nothing is ever downloaded for a *problem*. The participant's own file
+    /// still is, through the protocol crate's cache, with its checksum verified
+    /// before it is read.
+    pub cache_path: String,
 
     /// Requested at claim time and renewed while a submission is pending.
     ///
@@ -126,6 +171,7 @@ impl Config {
             tags: tags("Runner__Tags"),
             key_path: var("Runner__KeyPath")
                 .unwrap_or_else(|_| "/var/lib/algojudge-external-runner/identity.key".into()),
+            cache_path: var("Cache__Path").unwrap_or_else(|_| DEFAULT_CACHE_PATH.into()),
             lease_seconds: number("Lease__RequestSeconds", 1200)? as u32,
 
             external: External {
@@ -141,7 +187,11 @@ impl Config {
                 username: var("External__Username").context(
                     "AJ_External__Username is required: the account submissions are made under",
                 )?,
-                password: var("External__Password").context("AJ_External__Password is required")?,
+                // Untrimmed: see `secret`. The username stays trimmed — it is an
+                // identifier rather than a secret, and it becomes a path segment
+                // in a uHunt request.
+                password: secret("External__Password")
+                    .context("AJ_External__Password is required")?,
                 user_id: match var("External__UserId") {
                     Ok(value) => Some(number_in(&value, "External__UserId")?),
                     Err(_) => None,
@@ -153,7 +203,7 @@ impl Config {
                 submit_min_interval: number("External__SubmitMinIntervalSeconds", 5)?,
                 pending_timeout: number("External__PendingTimeoutSeconds", 900)?,
                 max_pending: number("External__MaxPending", 20)? as usize,
-                long_poll_enabled: flag("External__LongPollEnabled", true)?,
+                long_poll_enabled: flag("External__LongPollEnabled", DEFAULT_LONG_POLL_ENABLED)?,
             },
         };
 
@@ -161,12 +211,15 @@ impl Config {
         Ok(config)
     }
 
-    /// The three ways a configuration can be accepted and still be wrong.
+    /// Every way a configuration can be accepted and still be wrong.
     ///
     /// Checked at start-up rather than discovered in an hour: each of these
     /// fails somewhere far from its cause — a lease shorter than the timeout
     /// looks like the judge double-judging, and a poll floor below twenty
     /// looks like nothing at all until somebody else's server complains.
+    ///
+    /// **This said "the three ways" while there were five**, which is the shape
+    /// a count in prose always ends up in. There is no number here now.
     fn refuse_what_cannot_work(&self) -> anyhow::Result<()> {
         if self.external.poll_min < POLL_FLOOR_SECONDS {
             bail!(
@@ -180,6 +233,28 @@ impl Config {
                 "AJ_External__PollMaxSeconds is {}, below AJ_External__PollMinSeconds of {}",
                 self.external.poll_max,
                 self.external.poll_min
+            );
+        }
+        // **Before the two checks that compute with the lease**, because if the
+        // Server is going to clamp it then every number they reason about is
+        // one it never agreed to — and the message on the second of them says
+        // so out loud ("the Server clamps it at 3600, so this cannot exceed
+        // 900") while nothing enforced the antecedent. `tests/lease.rs` has
+        // carried the hole in prose since 2026-08-23: 3700 against a pending
+        // timeout of 3650 passes every other check, the Server grants 3600, and
+        // the job is held fifty seconds past the lease it really has.
+        //
+        // **No floor to match it**, and that is deliberate: the clamp's lower
+        // half grants *more* than was asked, so a lease that is too small is
+        // refused below on its own merits and never by being raised.
+        if self.lease_seconds > SERVER_LEASE_CEILING_SECONDS {
+            bail!(
+                "AJ_Lease__RequestSeconds is {}, above the {SERVER_LEASE_CEILING_SECONDS} \
+                 seconds the Server will grant. It clamps what it hands out, so this Runner \
+                 would renew against a deadline of its own invention and hold a job past the \
+                 lease it really has — and the next Runner to claim it would submit the same \
+                 solution again.",
+                self.lease_seconds
             );
         }
         if u64::from(self.lease_seconds) <= self.external.pending_timeout {
@@ -228,6 +303,26 @@ fn var(key: &str) -> Result<String, std::env::VarError> {
     match std::env::var(format!("AJ_{key}")) {
         Ok(value) if value.trim().is_empty() => Err(std::env::VarError::NotPresent),
         Ok(value) => Ok(value.trim().to_owned()),
+        Err(e) => Err(e),
+    }
+}
+
+/// A value read **exactly as it was given**.
+///
+/// **The trim in `var` is right for a URL and wrong for a credential.** A
+/// password with a leading or trailing space is legal on somebody else's site
+/// and easy to acquire by pasting one into a `.env`; trimming it sent a
+/// different password, the sign-in failed, and until 2026-08-31 that was
+/// reported as a lapsed session with two submissions attempted per job and
+/// nothing in any log naming the configuration.
+///
+/// Still absent when it is only whitespace: a password of three spaces is a
+/// field somebody left blank, and *required* is a more useful answer than a
+/// refusal from the archive.
+fn secret(key: &str) -> Result<String, std::env::VarError> {
+    match std::env::var(format!("AJ_{key}")) {
+        Ok(value) if value.trim().is_empty() => Err(std::env::VarError::NotPresent),
+        Ok(value) => Ok(value),
         Err(e) => Err(e),
     }
 }
@@ -299,6 +394,7 @@ mod tests {
             problem_types: vec![],
             tags: vec![],
             key_path: "/tmp/identity.key".into(),
+            cache_path: "/tmp/cache".into(),
             lease_seconds: 1200,
             external: External {
                 judge: DEFAULT_JUDGE.into(),
@@ -313,7 +409,7 @@ mod tests {
                 submit_min_interval: 5,
                 pending_timeout: 900,
                 max_pending: 20,
-                long_poll_enabled: true,
+                long_poll_enabled: DEFAULT_LONG_POLL_ENABLED,
             },
         }
     }
@@ -341,6 +437,28 @@ mod tests {
         std::env::remove_var("AJ_Runner__Tags");
     }
 
+    /// **A credential is not a URL, and one reader trimmed both.**
+    ///
+    /// A password ending in a space is legal on somebody else's site and is what
+    /// pasting into a `.env` produces. Trimming it sent a different password and
+    /// the failure surfaced three layers away, as a lapsed session with two
+    /// submissions attempted per job.
+    #[test]
+    fn a_password_is_not_trimmed_and_a_url_is() {
+        std::env::set_var("AJ_External__Password", " hunter2 ");
+        std::env::set_var("AJ_Server__BaseUrl", "  http://server:8080/api/v1  ");
+
+        assert_eq!(secret("External__Password").unwrap(), " hunter2 ");
+        assert_eq!(var("Server__BaseUrl").unwrap(), "http://server:8080/api/v1");
+
+        // Whitespace alone is a field somebody left blank, on either reader.
+        std::env::set_var("AJ_External__Password", "   ");
+        assert!(secret("External__Password").is_err());
+
+        std::env::remove_var("AJ_External__Password");
+        std::env::remove_var("AJ_Server__BaseUrl");
+    }
+
     #[test]
     fn a_poll_floor_below_twenty_is_refused() {
         let mut config = base();
@@ -348,6 +466,58 @@ mod tests {
         let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
         assert!(refused.contains("PollMinSeconds"), "{refused}");
         assert!(refused.contains("not lowered"), "{refused}");
+    }
+
+    /// **The rule the message beside it already stated and nothing enforced.**
+    ///
+    /// `tests/lease.rs` has described this hole in prose since 2026-08-23 — a
+    /// lease of 3700 against a pending timeout of 3650 clears every other check,
+    /// the Server grants 3600, and the job is then held fifty seconds past the
+    /// lease it really has. The knowledge lived in a test's doc comment and the
+    /// guard lived nowhere.
+    /// The default is pinned by what it *does*, not by its own literal.
+    ///
+    /// `AJ_External__LongPollEnabled` reads as a promise that verdicts arrive
+    /// by some route other than asking, so `schedule` flattens the net to its
+    /// ceiling. Nothing delivers that promise yet — the trigger is not built —
+    /// so an installation that never set the variable polled at the slowest
+    /// rate the configuration allows and waited longer for every verdict.
+    #[test]
+    fn the_accelerator_that_is_not_built_does_not_slow_the_net_down() {
+        let min = std::time::Duration::from_secs(20);
+        let max = std::time::Duration::from_secs(60);
+
+        assert_eq!(
+            crate::schedule::interval(
+                DEFAULT_LONG_POLL_ENABLED,
+                std::time::Duration::ZERO,
+                min,
+                max,
+                std::time::Duration::from_secs(120),
+            ),
+            min,
+            "a fresh submission is asked about at the floor, not at the ceiling"
+        );
+    }
+
+    #[test]
+    fn a_lease_above_the_servers_ceiling_is_refused() {
+        let mut config = base();
+        config.lease_seconds = 7200;
+        config.external.pending_timeout = 3650;
+        let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
+        assert!(refused.contains("RequestSeconds"), "{refused}");
+        assert!(refused.contains("3600"), "{refused}");
+
+        // The ceiling itself is a setting, not the first refusal — and the
+        // parenthetical in the message below it becomes true: nine hundred is
+        // exactly what a poll interval may be once the lease is capped here.
+        config.lease_seconds = SERVER_LEASE_CEILING_SECONDS;
+        config.external.pending_timeout = 900;
+        config.external.poll_max = 900;
+        config
+            .refuse_what_cannot_work()
+            .expect("the ceiling the Server grants is a lease this Runner may ask for");
     }
 
     /// The collision §3.2 of the specification found, refused at start-up rather

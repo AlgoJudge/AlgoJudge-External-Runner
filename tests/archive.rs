@@ -89,10 +89,69 @@ async fn a_submission_comes_back_with_the_archive_s_own_id() {
     assert_eq!(sid, 31254724);
 }
 
+/// **The archive took it, and did not say which id it gave it.**
+///
+/// `mosmsg=Submission+received+with+ID+` with nothing behind it. The id is
+/// assigned when the row reaches the judging queue, so a message rendered a
+/// moment earlier carries the phrase and no number — and the submission is on
+/// the account.
+///
+/// Until 2026-08-31 that was indistinguishable from having been signed out, so
+/// it earned the retry, and the retry gave one participant's one attempt two
+/// rows on somebody else's history. **The assertion that matters is
+/// `submits == 1`.**
+#[tokio::test]
+async fn an_archive_that_took_the_submission_and_named_no_id_is_never_sent_again() {
+    let server = MockServer::start().await;
+    let landing = format!(
+        "{}/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem\
+         &category=&mosmsg=Submission+received+with+ID+",
+        server.uri()
+    );
+    site_answering(
+        &server,
+        ResponseTemplate::new(302).insert_header("Location", landing.as_str()),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/index.php"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+
+    let refused = site(&server.uri())
+        .submit(100, 1, "int main(){}\n", Duration::from_millis(0))
+        .await
+        .expect_err("no id came back, so this cannot be reported as a success");
+    assert!(
+        matches!(
+            refused,
+            algojudge_external_runner::uva::site::Refused::AcceptedWithoutAnId
+        ),
+        "{refused}"
+    );
+
+    let sent = server.received_requests().await.unwrap();
+    let submits = sent
+        .iter()
+        .filter(|r| r.url.query().is_some_and(|q| q.contains("save_submission")))
+        .count();
+    assert_eq!(
+        submits, 1,
+        "the archive already has this submission; a second attempt is a second row"
+    );
+}
+
 /// A lapsed session is re-established **once**, and then given up on.
 ///
 /// The proof of concept looped fifteen times, which turns a wrong password into
 /// thirty requests against somebody else's site and a plausible ban.
+///
+/// **Two is right here for a reason it was not right before 2026-08-31.** The
+/// retry used to fire whenever no id came back; it now fires only on the one
+/// answer that earns it, which is the archive putting the login form back —
+/// `SIGNED_OUT` below is that form. An archive that took the submission without
+/// naming it is the test above, and is sent once.
 #[tokio::test]
 async fn a_lapsed_session_is_re_established_once_and_not_fifteen_times() {
     let server = MockServer::start().await;
@@ -126,6 +185,57 @@ async fn a_lapsed_session_is_re_established_once_and_not_fifteen_times() {
         .count();
     assert_eq!(submits, 2, "one attempt and one retry, no more");
     assert_eq!(logins, 2, "one sign-in each, not a loop of fifteen");
+}
+
+/// **A refused sign-in is a refused sign-in, and never a submission.**
+///
+/// onlinejudge.org answers a wrong password with 200 and the login page again.
+/// Until 2026-08-31 `sign_in` checked only the status, so that answer set
+/// `signed_in = true` and every job cost two sign-ins and two submissions to
+/// somebody else's account — for ever, under `restart: unless-stopped`, and
+/// reported as a lapsed session so that nothing ever said the password was
+/// wrong.
+///
+/// The assertion that matters is the last one: **no submission was attempted.**
+#[tokio::test]
+async fn a_sign_in_the_archive_refused_never_reaches_a_submission() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOGIN_PAGE))
+        .mount(&server)
+        .await;
+    // The refusal: 200, and the form back.
+    Mock::given(method("POST"))
+        .and(path("/index.php"))
+        .and(query_param("task", "login"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOGIN_PAGE))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/index.php"))
+        .and(query_param("page", "save_submission"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SIGNED_OUT))
+        .mount(&server)
+        .await;
+
+    let refused = site(&server.uri())
+        .submit(100, 1, "int main(){}\n", Duration::from_millis(0))
+        .await
+        .expect_err("a sign-in the archive refused is not a session");
+    let said = refused.to_string();
+    assert!(said.contains("credentials are refused"), "{said}");
+
+    let sent = server.received_requests().await.unwrap();
+    let submits = sent
+        .iter()
+        .filter(|r| r.url.query().is_some_and(|q| q.contains("save_submission")))
+        .count();
+    assert_eq!(
+        submits, 0,
+        "nothing may be submitted under a refused sign-in"
+    );
 }
 
 /// Serialisation is a correctness requirement, not politeness: with one submit
