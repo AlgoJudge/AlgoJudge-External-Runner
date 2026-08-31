@@ -64,29 +64,69 @@ pub fn shows_the_login_form(page: &str) -> bool {
     Html::parse_document(page).select(&form).next().is_some()
 }
 
-/// The external submission id, out of the redirect the site answers with.
+/// What the address a submission landed on says happened to it.
 ///
-/// **This is the correlation key and there is no other.** Element 0 of a uHunt
-/// submission row is this number — confirmed against the live archive on
-/// 2026-08-16, where the id in the redirect (`31254724`) was the id uHunt then
-/// reported for that submission.
+/// **Four answers, and `sid_from` gave two of them the same name.** It returned
+/// `None` when the phrase was absent — nothing said a submission was received,
+/// so most likely none was — and `None` again when the phrase was there with no
+/// digits behind it, which is the archive saying it **took** the submission and
+/// only failing to name it. `submit` retried on `None`, so the second case put
+/// a second row on a third party's account for one participant's one attempt,
+/// and nothing anywhere said so.
 ///
-/// Both spellings are accepted because the site answers with a URL-encoded
-/// message and a reader may or may not have decoded it before getting here.
-pub fn sid_from(trail: &str) -> Option<i64> {
+/// The unit test that pinned the old behaviour said as much and was read as
+/// reassurance: *"while a submission is queued the id is simply absent, which
+/// is the ordinary case"*. The ordinary case was the dangerous one.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Landed {
+    /// The phrase and a number.
+    ///
+    /// **This is the correlation key and there is no other.** Element 0 of a
+    /// uHunt submission row is this number — confirmed against the live archive
+    /// on 2026-08-16, where the id in the redirect (`31254724`) was the id uHunt
+    /// then reported for that submission.
+    Accepted(i64),
+    /// **The phrase, and no digits.** The archive received it. A retry here is a
+    /// duplicate submission, so there is not one.
+    AcknowledgedWithoutAnId,
+    /// The page we came back to is the login form. The session is gone, and
+    /// this is the only evidence of that there is.
+    SignedOut,
+    /// Neither, which is not evidence that nothing was received.
+    NothingSaid,
+}
+
+/// Read from the address **and** the page, because they answer different halves.
+///
+/// The id lives in the address the redirect chain ended at, which `reqwest` has
+/// already followed. Whether we are still signed in lives in the body, and the
+/// body was never read: `send` returned `sid_from(answer.url())` and dropped the
+/// response.
+///
+/// Both spellings of the phrase are accepted because the site answers with a
+/// URL-encoded message and a reader may or may not have decoded it first.
+pub fn landed(address: &str, page: &str) -> Landed {
     let plus = "Submission+received+with+ID+";
     let spaced = "Submission received with ID ";
     let digits = |at: usize| {
-        trail[at..]
+        address[at..]
             .chars()
             .take_while(char::is_ascii_digit)
             .collect::<String>()
     };
-    let found = trail
+    let found = address
         .find(plus)
         .map(|at| digits(at + plus.len()))
-        .or_else(|| trail.find(spaced).map(|at| digits(at + spaced.len())))?;
-    found.parse().ok()
+        .or_else(|| address.find(spaced).map(|at| digits(at + spaced.len())));
+
+    match found {
+        Some(digits) => match digits.parse() {
+            Ok(sid) => Landed::Accepted(sid),
+            Err(_) => Landed::AcknowledgedWithoutAnId,
+        },
+        None if shows_the_login_form(page) => Landed::SignedOut,
+        None => Landed::NothingSaid,
+    }
 }
 
 /// What is sent as the source.
@@ -228,9 +268,17 @@ impl Site {
 
     /// Sends one submission and returns the archive's id for it.
     ///
-    /// Exactly one re-login and one retry. The proof of concept looped fifteen
-    /// times, which turns a wrong password into thirty requests and a plausible
-    /// ban.
+    /// **One retry, and only for the one answer that earns it.** It used to
+    /// retry whenever no id came back, which conflated two opposite facts: the
+    /// archive saying nothing, and the archive saying *"Submission received"*
+    /// without a number. The second is a submission that is already on the
+    /// account, and re-sending it gave one participant's one attempt two rows
+    /// on somebody else's history — the failure this whole module is written to
+    /// avoid, reachable by a wording change on a site nobody here controls.
+    ///
+    /// So the retry is now evidence-based: it fires when the page we came back
+    /// to is the login form, which is the same signal `sign_in` reads, and never
+    /// on a guess.
     pub async fn submit(
         &self,
         problem_number: i64,
@@ -240,30 +288,39 @@ impl Site {
     ) -> Result<i64, Refused> {
         let mut turn = self.turn.lock().await;
 
-        if let Some(last) = turn.last_submit {
-            let since = last.elapsed();
-            if since < min_interval {
-                tokio::time::sleep(min_interval - since).await;
-            }
-        }
-
         // **Twice, written twice.** This was a loop with a bound of two and a
         // guard inside it that returned on the second pass — so the bound
         // enforced nothing, and a sabotage that raised it to fifteen changed no
         // behaviour and reddened no test. Straight-line, the rule is where a
         // reader looks for it and a third attempt cannot be added by accident.
-        if let Some(sid) = self
-            .attempt(&mut turn, problem_number, language_id, source)
+        match self
+            .attempt(&mut turn, problem_number, language_id, source, min_interval)
             .await?
         {
-            return Ok(sid);
+            Landed::Accepted(sid) => return Ok(sid),
+            Landed::AcknowledgedWithoutAnId => return Err(Refused::AcceptedWithoutAnId),
+            Landed::NothingSaid => {
+                return Err(Refused::Site(
+                    "nothing in the answer said a submission was received, and nothing \
+                     said the session had lapsed either"
+                        .into(),
+                ))
+            }
+            Landed::SignedOut => {}
         }
 
-        tracing::warn!("no submission id came back; re-establishing the session once");
+        tracing::warn!(
+            "the submission landed back on the login form; re-establishing the session once"
+        );
         turn.signed_in = false;
-        self.attempt(&mut turn, problem_number, language_id, source)
+        match self
+            .attempt(&mut turn, problem_number, language_id, source, min_interval)
             .await?
-            .ok_or(Refused::SessionLapsed)
+        {
+            Landed::Accepted(sid) => Ok(sid),
+            Landed::AcknowledgedWithoutAnId => Err(Refused::AcceptedWithoutAnId),
+            Landed::SignedOut | Landed::NothingSaid => Err(Refused::SessionLapsed),
+        }
     }
 
     /// One sign-in if needed, and one submission.
@@ -273,19 +330,36 @@ impl Site {
         problem_number: i64,
         language_id: i64,
         source: &str,
-    ) -> Result<Option<i64>, Refused> {
+        min_interval: Duration,
+    ) -> Result<Landed, Refused> {
         if !turn.signed_in {
             self.sign_in()
                 .await
                 .map_err(|e| Refused::Site(e.to_string()))?;
             turn.signed_in = true;
         }
-        let sent = self
-            .send(problem_number, language_id, source)
-            .await
-            .map_err(|e| Refused::Site(e.to_string()))?;
+
+        // **The gate is on every attempt, not on the first one.** The sleep used
+        // to sit in `submit`, above a straight-line pair of calls, so the retry
+        // went out with no gap at all — at the one moment this Runner is most
+        // likely to look like something worth blocking.
+        if let Some(last) = turn.last_submit {
+            let since = last.elapsed();
+            if since < min_interval {
+                tokio::time::sleep(min_interval - since).await;
+            }
+        }
+
+        // **Stamped before the request leaves, not after it succeeded.** The
+        // interval bounds how often this Runner touches somebody else's site,
+        // and a request that failed in transport touched it exactly as much as
+        // one that worked — a connect or read timeout is in fact the case where
+        // the POST is most likely to have arrived anyway. Stamping afterwards
+        // left the timestamp stale, so the next attempt went out ungated.
         turn.last_submit = Some(Instant::now());
-        Ok(sent)
+        self.send(problem_number, language_id, source)
+            .await
+            .map_err(|e| Refused::Site(e.to_string()))
     }
 
     async fn send(
@@ -293,7 +367,7 @@ impl Site {
         problem_number: i64,
         language_id: i64,
         source: &str,
-    ) -> anyhow::Result<Option<i64>> {
+    ) -> anyhow::Result<Landed> {
         let answer = self
             .http
             .post(format!(
@@ -318,9 +392,14 @@ impl Site {
             .send()
             .await?;
 
-        // The id is in the address the redirect chain ended at, which reqwest
-        // has already followed. Confirmed against the live archive 2026-08-16.
-        Ok(sid_from(answer.url().as_str()))
+        // **Both halves of the answer.** The id is in the address the redirect
+        // chain ended at, which reqwest has already followed — confirmed against
+        // the live archive 2026-08-16. Whether we are still signed in is in the
+        // body, which this dropped unread until 2026-08-31, and it is the only
+        // thing that can earn a retry.
+        let address = answer.url().to_string();
+        let page = answer.text().await?;
+        Ok(landed(&address, &page))
     }
 }
 
@@ -385,19 +464,39 @@ mod tests {
     fn the_id_comes_out_of_the_redirect() {
         let encoded = "https://onlinejudge.org/index.php?option=com_onlinejudge&Itemid=25\
                        &page=submit_problem&category=&mosmsg=Submission+received+with+ID+31254724";
-        assert_eq!(sid_from(encoded), Some(31254724));
+        assert_eq!(landed(encoded, "ok"), Landed::Accepted(31254724));
 
         let decoded =
             "https://onlinejudge.org/index.php?…&mosmsg=Submission received with ID 31254726";
-        assert_eq!(sid_from(decoded), Some(31254726));
+        assert_eq!(landed(decoded, "ok"), Landed::Accepted(31254726));
     }
 
-    /// While a submission is queued the id is simply absent, which is the
-    /// ordinary case and not a parse failure.
+    /// **This test used to assert the defect**, and it read as reassurance.
+    ///
+    /// It was `no_id_is_none_rather_than_a_panic`, and it pinned
+    /// `sid_from("…received+with+ID+") == None` beside
+    /// `sid_from("https://onlinejudge.org/") == None` — the two cases given one
+    /// answer, with a doc comment calling the first *"the ordinary case"*. It
+    /// is: the archive assigns the id when the row reaches the judging queue,
+    /// so a message rendered a moment earlier carries the phrase and no number.
+    /// The submission is on the account. `submit` retried on that answer.
     #[test]
-    fn no_id_is_none_rather_than_a_panic() {
-        assert_eq!(sid_from("https://onlinejudge.org/"), None);
-        assert_eq!(sid_from("mosmsg=Submission+received+with+ID+"), None);
+    fn the_two_ways_no_id_comes_back_are_not_the_same_answer() {
+        // The archive took it and did not name it. Never retried.
+        assert_eq!(
+            landed("mosmsg=Submission+received+with+ID+", "ok"),
+            Landed::AcknowledgedWithoutAnId
+        );
+        // We came back to the login form. This, and only this, earns a retry.
+        assert_eq!(
+            landed("https://onlinejudge.org/", LOGIN_PAGE),
+            Landed::SignedOut
+        );
+        // Neither, which is not evidence that nothing was received.
+        assert_eq!(
+            landed("https://onlinejudge.org/", "a maintenance page"),
+            Landed::NothingSaid
+        );
     }
 
     /// The measurement above, pinned: nothing is added to somebody's source.

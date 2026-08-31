@@ -93,6 +93,15 @@ pub enum Outcome {
 pub enum Refused {
     /// The session is gone — re-establish it **once** and try again.
     SessionLapsed,
+    /// **The judge said it received the submission and did not name it.**
+    ///
+    /// Its own variant rather than a `Site`, because the two earn opposite
+    /// treatment and were given the same one until 2026-08-31: this submission
+    /// is **on the account**. A second attempt is a second row on a third
+    /// party's history for one participant's one attempt, and no id will ever
+    /// match this job to the answer it produces. The job fails and stays
+    /// rejudgeable — by a person, who can look at the account first.
+    AcceptedWithoutAnId,
     /// Anything else. Not retried: a second attempt at a submission the judge
     /// has already refused is a duplicate to a third party.
     Site(String),
@@ -102,6 +111,10 @@ impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SessionLapsed => write!(f, "the session with the judge had lapsed"),
+            Self::AcceptedWithoutAnId => write!(
+                f,
+                "the judge received the submission and did not say which id it gave it"
+            ),
             Self::Site(why) => write!(f, "the judge refused the submission: {why}"),
         }
     }

@@ -315,6 +315,12 @@ impl<J: Judge> Runner<J> {
             // operator reading a failed submission needs.
             .map_err(|refused| match refused {
                 Refused::SessionLapsed => anyhow::anyhow!("the {name} session had lapsed"),
+                Refused::AcceptedWithoutAnId => anyhow::anyhow!(
+                    "{name} received the submission and did not say which id it gave it. \
+                     It is on the account and cannot be matched to this job — look at the \
+                     account before rejudging, or the participant gets two rows for one \
+                     attempt"
+                ),
                 Refused::Site(why) => anyhow::anyhow!("{name} refused the submission: {why}"),
             })?;
 

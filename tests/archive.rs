@@ -89,10 +89,69 @@ async fn a_submission_comes_back_with_the_archive_s_own_id() {
     assert_eq!(sid, 31254724);
 }
 
+/// **The archive took it, and did not say which id it gave it.**
+///
+/// `mosmsg=Submission+received+with+ID+` with nothing behind it. The id is
+/// assigned when the row reaches the judging queue, so a message rendered a
+/// moment earlier carries the phrase and no number — and the submission is on
+/// the account.
+///
+/// Until 2026-08-31 that was indistinguishable from having been signed out, so
+/// it earned the retry, and the retry gave one participant's one attempt two
+/// rows on somebody else's history. **The assertion that matters is
+/// `submits == 1`.**
+#[tokio::test]
+async fn an_archive_that_took_the_submission_and_named_no_id_is_never_sent_again() {
+    let server = MockServer::start().await;
+    let landing = format!(
+        "{}/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem\
+         &category=&mosmsg=Submission+received+with+ID+",
+        server.uri()
+    );
+    site_answering(
+        &server,
+        ResponseTemplate::new(302).insert_header("Location", landing.as_str()),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/index.php"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+
+    let refused = site(&server.uri())
+        .submit(100, 1, "int main(){}\n", Duration::from_millis(0))
+        .await
+        .expect_err("no id came back, so this cannot be reported as a success");
+    assert!(
+        matches!(
+            refused,
+            algojudge_external_runner::uva::site::Refused::AcceptedWithoutAnId
+        ),
+        "{refused}"
+    );
+
+    let sent = server.received_requests().await.unwrap();
+    let submits = sent
+        .iter()
+        .filter(|r| r.url.query().is_some_and(|q| q.contains("save_submission")))
+        .count();
+    assert_eq!(
+        submits, 1,
+        "the archive already has this submission; a second attempt is a second row"
+    );
+}
+
 /// A lapsed session is re-established **once**, and then given up on.
 ///
 /// The proof of concept looped fifteen times, which turns a wrong password into
 /// thirty requests against somebody else's site and a plausible ban.
+///
+/// **Two is right here for a reason it was not right before 2026-08-31.** The
+/// retry used to fire whenever no id came back; it now fires only on the one
+/// answer that earns it, which is the archive putting the login form back —
+/// `SIGNED_OUT` below is that form. An archive that took the submission without
+/// naming it is the test above, and is sent once.
 #[tokio::test]
 async fn a_lapsed_session_is_re_established_once_and_not_fifteen_times() {
     let server = MockServer::start().await;
