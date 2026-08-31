@@ -244,3 +244,8 @@ places would tell a participant the two were built by the same compiler.
   `example-uva-development-docker-compose.yaml` stands the Server up, so running
   them is one command rather than an afternoon. What is still owed is the CI step
   that calls it.
+
+## License
+
+See [LICENSE](LICENSE). MIT, and the same text the other AlgoJudge repositories
+carry.
