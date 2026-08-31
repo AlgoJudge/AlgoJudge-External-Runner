@@ -55,6 +55,21 @@ pub const DEFAULT_JUDGE: &str = "uva";
 /// constant it could not see.
 pub const DEFAULT_CACHE_PATH: &str = "/var/cache/algojudge-external-runner";
 
+/// How much of the source cache to keep when nothing says otherwise.
+///
+/// **A fortieth of `AlgoJudge-Runner`'s ten gigabytes, and deliberately.**
+/// That Runner caches problem *packages* — test data, reference solutions, a
+/// checker — and one of those can be hundreds of megabytes on its own. This one
+/// caches nothing but participants' source files, which are text. 256 MiB of
+/// text is tens of thousands of submissions.
+///
+/// Below one submission's worth the cache still works, and simply never hits:
+/// `evict_to_fit` skips whatever is being read, so the entry a job is using
+/// survives and is evicted once the job lets go. The cost of setting this too
+/// low is one download per job, not a failure — which is why nothing refuses a
+/// small value.
+pub const DEFAULT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Whether the long-poll accelerator is on when nothing says otherwise.
 ///
 /// **Off, and it defaulted to on until 2026-08-31.** The flag has no trigger
@@ -105,6 +120,14 @@ pub struct Config {
     /// still is, through the protocol crate's cache, with its checksum verified
     /// before it is read.
     pub cache_path: String,
+
+    /// How much of that cache to keep, from `AJ_Cache__MaxBytes`.
+    ///
+    /// **It was `256 * 1024 * 1024` written into `main` until 2026-08-31** —
+    /// the same shape as the path beside it, which shipped an image that could
+    /// not judge anything. A number nobody outside one file can name is a number
+    /// nobody can correct.
+    pub cache_max_bytes: u64,
 
     /// Requested at claim time and renewed while a submission is pending.
     ///
@@ -172,6 +195,7 @@ impl Config {
             key_path: var("Runner__KeyPath")
                 .unwrap_or_else(|_| "/var/lib/algojudge-external-runner/identity.key".into()),
             cache_path: var("Cache__Path").unwrap_or_else(|_| DEFAULT_CACHE_PATH.into()),
+            cache_max_bytes: number("Cache__MaxBytes", DEFAULT_CACHE_MAX_BYTES)?,
             lease_seconds: number("Lease__RequestSeconds", 1200)? as u32,
 
             external: External {
@@ -395,6 +419,7 @@ mod tests {
             tags: vec![],
             key_path: "/tmp/identity.key".into(),
             cache_path: "/tmp/cache".into(),
+            cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
             lease_seconds: 1200,
             external: External {
                 judge: DEFAULT_JUDGE.into(),
@@ -457,6 +482,110 @@ mod tests {
 
         std::env::remove_var("AJ_External__Password");
         std::env::remove_var("AJ_Server__BaseUrl");
+    }
+
+    /// **Two literals in `main` cost this repository an image that could not
+    /// judge anything**, and the guard is on the source because no tool can see
+    /// it: a hard-coded value compiles, passes `clippy`, and is invisible until
+    /// somebody needs to change it on a running installation.
+    ///
+    /// The cache is built from configuration alone — the path and the ceiling
+    /// both — so a number appearing between these parentheses again reddens
+    /// this rather than shipping.
+    #[test]
+    fn main_builds_the_cache_from_configuration_and_not_from_literals() {
+        let main = include_str!("main.rs");
+        let start = main.find("Cache::new(").expect("main builds a cache");
+        let call = &main[start..start + main[start..].find("));").expect("a closed call")];
+
+        assert!(
+            call.contains("config.cache_path"),
+            "the cache path is not read from configuration: {call}"
+        );
+        assert!(
+            call.contains("config.cache_max_bytes"),
+            "the cache ceiling is not read from configuration: {call}"
+        );
+        assert!(
+            !call.chars().any(|c| c.is_ascii_digit()),
+            "a literal number survives in the cache construction: {call}"
+        );
+    }
+
+    /// The ceiling an operator sets is the ceiling the cache gets, and a typo
+    /// in it says so rather than silently leaving the default in place.
+    #[test]
+    fn the_cache_ceiling_is_read_from_the_environment() {
+        std::env::remove_var("AJ_Cache__MaxBytes");
+        assert_eq!(
+            number("Cache__MaxBytes", DEFAULT_CACHE_MAX_BYTES).unwrap(),
+            DEFAULT_CACHE_MAX_BYTES
+        );
+
+        std::env::set_var("AJ_Cache__MaxBytes", "1073741824");
+        assert_eq!(
+            number("Cache__MaxBytes", DEFAULT_CACHE_MAX_BYTES).unwrap(),
+            1_073_741_824
+        );
+
+        std::env::set_var("AJ_Cache__MaxBytes", "256MB");
+        let refused = number("Cache__MaxBytes", DEFAULT_CACHE_MAX_BYTES)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("AJ_Cache__MaxBytes"), "{refused}");
+
+        std::env::remove_var("AJ_Cache__MaxBytes");
+    }
+
+    /// **`.env.example` claims to list every variable, and nothing checked it.**
+    ///
+    /// Four were missing when this was written by hand on 2026-08-31, and the
+    /// file's own first line promised otherwise. An operator who trusts that
+    /// promise cannot configure what it omits: the variable is not undocumented,
+    /// it is *invisible*, which is worse because there is nowhere to look.
+    ///
+    /// Both halves are read as text, because the drift is between two files and
+    /// no compiler sees either as configuration. A commented-out line counts as
+    /// listed — that is how a switch is offered without being set.
+    #[test]
+    fn every_variable_the_config_reads_is_in_the_example_and_no_others() {
+        let read: std::collections::BTreeSet<String> = include_str!("config.rs")
+            .split('"')
+            .filter(|piece| a_key(piece))
+            .map(|piece| format!("AJ_{piece}"))
+            .collect();
+
+        let listed: std::collections::BTreeSet<String> = include_str!("../.env.example")
+            .lines()
+            .map(|line| line.trim_start_matches('#').trim())
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, _)| name.trim().to_owned())
+            .filter(|name| name.starts_with("AJ_"))
+            .collect();
+
+        let missing: Vec<_> = read.difference(&listed).collect();
+        assert!(
+            missing.is_empty(),
+            "read by the config and absent from .env.example: {missing:?}"
+        );
+
+        let stale: Vec<_> = listed.difference(&read).collect();
+        assert!(
+            stale.is_empty(),
+            "listed in .env.example and read by nothing: {stale:?}"
+        );
+    }
+
+    /// A configuration key exactly, and not a sentence that mentions one.
+    fn a_key(piece: &str) -> bool {
+        let Some((section, rest)) = piece.split_once("__") else {
+            return false;
+        };
+        matches!(
+            section,
+            "Server" | "Runner" | "Cache" | "External" | "Lease"
+        ) && !rest.is_empty()
+            && rest.chars().all(|c| c.is_ascii_alphanumeric())
     }
 
     #[test]

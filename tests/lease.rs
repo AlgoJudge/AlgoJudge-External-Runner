@@ -232,9 +232,10 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
 
     // From the configuration, like the binary does, rather than beside it: two
     // places naming one directory is how the image came to ship without it.
+    // The ceiling was doing exactly that one line down until 2026-08-31.
     let cache = Arc::new(aj_protocol::Cache::new(
         std::path::PathBuf::from(&config.cache_path),
-        64 * 1024 * 1024,
+        config.cache_max_bytes,
     ));
     let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
 
@@ -357,6 +358,7 @@ fn probe_config(site: &str, hunt: &str) -> algojudge_external_runner::config::Co
             .join("lease-probe-cache")
             .to_string_lossy()
             .into_owned(),
+        cache_max_bytes: 64 * 1024 * 1024,
         lease_seconds: 80,
         external: algojudge_external_runner::config::External {
             judge: "uva".into(),
