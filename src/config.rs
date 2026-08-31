@@ -55,6 +55,20 @@ pub const DEFAULT_JUDGE: &str = "uva";
 /// constant it could not see.
 pub const DEFAULT_CACHE_PATH: &str = "/var/cache/algojudge-external-runner";
 
+/// Whether the long-poll accelerator is on when nothing says otherwise.
+///
+/// **Off, and it defaulted to on until 2026-08-31.** The flag has no trigger
+/// behind it — the accelerator is accepted and not built — and `schedule` reads
+/// it as a promise that verdicts arrive by another route, so it flattens the
+/// interval net to its *ceiling*. Every installation that never set the
+/// variable was therefore asking the archive once a minute instead of three
+/// times, and waiting up to forty seconds longer for each verdict, in exchange
+/// for a promptness nothing was delivering.
+///
+/// A switch defaults to the behaviour that works. When the trigger is built,
+/// this becomes a decision again.
+pub const DEFAULT_LONG_POLL_ENABLED: bool = false;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub server_base_url: String,
@@ -189,7 +203,7 @@ impl Config {
                 submit_min_interval: number("External__SubmitMinIntervalSeconds", 5)?,
                 pending_timeout: number("External__PendingTimeoutSeconds", 900)?,
                 max_pending: number("External__MaxPending", 20)? as usize,
-                long_poll_enabled: flag("External__LongPollEnabled", true)?,
+                long_poll_enabled: flag("External__LongPollEnabled", DEFAULT_LONG_POLL_ENABLED)?,
             },
         };
 
@@ -395,7 +409,7 @@ mod tests {
                 submit_min_interval: 5,
                 pending_timeout: 900,
                 max_pending: 20,
-                long_poll_enabled: true,
+                long_poll_enabled: DEFAULT_LONG_POLL_ENABLED,
             },
         }
     }
@@ -461,6 +475,31 @@ mod tests {
     /// the Server grants 3600, and the job is then held fifty seconds past the
     /// lease it really has. The knowledge lived in a test's doc comment and the
     /// guard lived nowhere.
+    /// The default is pinned by what it *does*, not by its own literal.
+    ///
+    /// `AJ_External__LongPollEnabled` reads as a promise that verdicts arrive
+    /// by some route other than asking, so `schedule` flattens the net to its
+    /// ceiling. Nothing delivers that promise yet — the trigger is not built —
+    /// so an installation that never set the variable polled at the slowest
+    /// rate the configuration allows and waited longer for every verdict.
+    #[test]
+    fn the_accelerator_that_is_not_built_does_not_slow_the_net_down() {
+        let min = std::time::Duration::from_secs(20);
+        let max = std::time::Duration::from_secs(60);
+
+        assert_eq!(
+            crate::schedule::interval(
+                DEFAULT_LONG_POLL_ENABLED,
+                std::time::Duration::ZERO,
+                min,
+                max,
+                std::time::Duration::from_secs(120),
+            ),
+            min,
+            "a fresh submission is asked about at the floor, not at the ceiling"
+        );
+    }
+
     #[test]
     fn a_lease_above_the_servers_ceiling_is_refused() {
         let mut config = base();
