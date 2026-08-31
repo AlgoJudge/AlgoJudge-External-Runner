@@ -7,8 +7,14 @@ This is a Runner that does not judge anything. It claims jobs of an external
 problem type, forwards the solution to the judging system that owns that type,
 waits for that system to decide, and reports its verdict back to AlgoJudge.
 
-**The verdict is somebody else's opinion**, and every screen that shows it says
-so. This Runner runs no code, has no sandbox, and measures nothing.
+**The verdict is somebody else's opinion**, and the submission's own page says
+so — the `uva@1` result renderer names the judge and states that the verdict is
+theirs. **The other places a verdict appears do not**: the shared state badge,
+the manager's submissions table and the notification toast all render the string
+alone, because they are problem-type-agnostic and never resolve a renderer. A
+participant reading `WrongAnswer` in a list is not told whose opinion it is.
+That gap is the Client's, recorded here because this README is where the claim
+was made. This Runner runs no code, has no sandbox, and measures nothing.
 
 ## Integrations
 
@@ -148,8 +154,9 @@ at a time, and it stops there: a Runner that could re-declare its tags on restar
 would put itself into an examination's pool with nobody having approved it.
 Changing the variable later changes nothing, deliberately.
 
-Two numbers are checked against each other at start-up rather than discovered an
-hour later:
+Configuration is refused at start-up rather than discovered an hour later. **No
+count here on purpose** — `refuse_what_cannot_work` has grown twice and this
+sentence said "two" through both. These are the ones an operator meets:
 
 - **`AJ_Lease__RequestSeconds` must exceed `AJ_External__PendingTimeoutSeconds`.**
   Otherwise the Server reclaims the job while this Runner is still waiting on the
@@ -158,6 +165,15 @@ hour later:
   lease is renewed on the polling cycle, so slowing the polling down to be polite
   to somebody else's service slows the renewing down with it — and a lease that
   expires between two renewals is the same double submission by another route.
+- **`AJ_Lease__RequestSeconds` may not exceed 3600.** The Server clamps what it
+  grants, so a larger request is a deadline of this Runner's own invention: it
+  would renew against a lease it does not have and hold a job past the real one.
+  **This bounds the variable the first bullet tells you to raise** — pushing
+  `AJ_External__PendingTimeoutSeconds` up eventually leaves no legal lease above
+  it, and the refusal says so.
+- **`AJ_External__PollMaxSeconds` may not be below `PollMinSeconds`**, and
+  `PollMinSeconds` may not be below twenty. An external judge may publish no rate
+  limit at all, as onlinejudge.org does not, so that floor is not lowered.
 
 ## Running it end to end
 

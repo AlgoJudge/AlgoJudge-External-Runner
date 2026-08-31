@@ -5,11 +5,18 @@
 #   AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1 ./x test -- --include-ignored
 #   docker compose -f example-development-docker-compose.yaml down -v
 #
-# **This is the stack the README asked for.** Every integration test here is
-# `#[ignore]`d and needs `AJ_TEST_SERVER`, so CI runs none of them and a
-# regression in lease renewal reddens no pull request — the README named the fix
-# as "a CI step that stands a Server up, the way AlgoJudge-Runner does", and this
-# is that file. It builds the Server from a sibling checkout, so it needs
+# **This is the stack the README asked for**, and what it is still for is the
+# three tests that need a real Server: `claim_lease`, `lease` and `stack` are
+# `#[ignore]`d and read `AJ_TEST_SERVER`. Everything else runs without it —
+# thirteen tests across `archive`, `loop` and `claim_lease` are not ignored, and
+# `cargo test --workspace` in CI runs all of them against stand-ins.
+#
+# **This said CI ran none of them and that a lease-renewal regression reddened no
+# pull request.** The first half was wrong when it was written on 2026-08-24 and
+# the second stopped being true on 2026-08-31: `tests/loop.rs` drives the whole
+# loop against a Server stand-in whose lease endpoint answers 503, and asserts
+# the job is reported rather than dropped. It builds the Server from a sibling
+# checkout, so it needs
 # `AlgoJudge-Server` beside this repository.
 #
 # **Not the production stack.** That belongs in `AlgoJudge-Ops`, which does not
@@ -98,9 +105,14 @@ services:
     # a bare `- .env` until 2026-08-31, and Compose treats a missing env file as
     # a hard error: the whole stack — Postgres and the Server with it — refused
     # to start, naming a file the repository deliberately does not ship. That is
-    # the first command in this file's own header, on a fresh clone. Without the
-    # file the Runner starts and fails to sign in, which is a Runner's log rather
-    # than a stack that will not stand up. Needs Compose v2.24 or newer.
+    # the first command in this file's own header, on a fresh clone.
+    #
+    # **What happens without the file is still one container's problem**, which is
+    # the point — Postgres and the Server come up. But the Runner does not reach a
+    # sign-in to fail at: the account is required with no default, so it exits
+    # while reading its configuration, before the identity key, the registration
+    # or either archive client. Under `restart: unless-stopped` that is a
+    # crash-loop, not a log line. Needs Compose v2.24 or newer.
     env_file:
       - path: .env
         required: false
