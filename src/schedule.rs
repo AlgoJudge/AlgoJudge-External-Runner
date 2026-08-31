@@ -1,4 +1,4 @@
-//! How often to ask the archive anything.
+//! How often to ask a judging system anything.
 //!
 //! Two mechanisms, and they are not a pair of alternatives:
 //!
@@ -6,11 +6,12 @@
 //!   sixty seconds, whether or not anything else is delivering. A safety net that
 //!   only runs during an incident is exercised only during an incident, which is
 //!   the worst moment to discover it is broken.
-//! - **Long polling is a hint.** uHunt's event stream is global, buffers only the
-//!   last hundred events, and its own documentation warns that a client that
-//!   stops polling loses events. A missed event would mean a submission that
-//!   never completes until its timeout — a correctness failure, not a latency
-//!   one — so it triggers a fetch and is never read for verdicts.
+//! - **Long polling is a hint.** Where an integration has one it is a stream it
+//!   does not own: uHunt's is global, buffers only the last hundred events, and
+//!   its own documentation warns that a client that stops polling loses events. A
+//!   missed event would mean a submission that never completes until its timeout
+//!   — a correctness failure, not a latency one — so it triggers a fetch and is
+//!   never read for verdicts.
 //!
 //! Escalation exists only for the case where the hint is switched off, because
 //! that is the only case where freshness still has to be traded against being a

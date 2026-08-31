@@ -23,24 +23,15 @@
 //! with UVa's. Showing a participant "C++11 (GCC)" in both places would say the
 //! two were judged by the same compiler.
 
-/// One language the archive accepts.
-pub struct Language {
-    /// The product's id, as a submission carries it.
-    pub id: &'static str,
-    /// What a person reads. The archive's own compiler and version.
-    pub label: &'static str,
-    /// The value the archive's submit form posts. Its numbering, not ours.
-    pub number: i64,
-}
+use crate::integration::Language;
 
 /// The six, in the order the archive's own form lists them.
 ///
 /// **Only `5` has been watched work.** A real submission was accepted under it
 /// on 2026-08-16 (sid 31255986). The other five are read off the archive's form
 /// and nobody here has submitted through them; that distinction is recorded in
-/// the README under *Known gaps* and is the reason this table is small enough
-/// to check by hand.
-const CATALOGUE: &[Language] = &[
+/// the README and is the reason this table is small enough to check by hand.
+pub const CATALOGUE: &[Language] = &[
     Language {
         id: "c89-gcc",
         label: "C89 / ANSI C (GCC 5.3.0)",
@@ -72,10 +63,6 @@ const CATALOGUE: &[Language] = &[
         number: 6,
     },
 ];
-
-pub fn catalogue() -> &'static [Language] {
-    CATALOGUE
-}
 
 pub fn for_id(id: &str) -> Option<&'static Language> {
     CATALOGUE.iter().find(|l| l.id == id)

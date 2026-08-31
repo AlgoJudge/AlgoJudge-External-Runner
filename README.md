@@ -1,14 +1,44 @@
-# AlgoJudge-Runner-UVa
+# AlgoJudge-External-Runner
 
 AlgoJudge is open-source, self-hosted software for programming contests and
 courses, with automatic evaluation of submitted solutions.
 
-This is a Runner that does not judge anything. It forwards `uva@1` submissions
-to [onlinejudge.org](https://onlinejudge.org), waits for the archive to decide,
-and reports the archive's verdict back to AlgoJudge.
+This is a Runner that does not judge anything. It claims jobs of an external
+problem type, forwards the solution to the judging system that owns that type,
+waits for that system to decide, and reports its verdict back to AlgoJudge.
 
 **The verdict is somebody else's opinion**, and every screen that shows it says
 so. This Runner runs no code, has no sandbox, and measures nothing.
+
+## Integrations
+
+**One exists: UVa Online Judge**, serving the problem type `uva@1` against
+[onlinejudge.org](https://onlinejudge.org). It is `src/uva/`.
+
+Everything the loop needs from a judging system is declared as one trait in
+[`src/integration.rs`](src/integration.rs) — what the judge is called, which
+problem type it serves, which languages it accepts, how a submission is handed
+over, and how an answer is read. `src/run.rs` is written against that trait and
+names no archive, so a second integration is a module beside `src/uva/` and one
+arm in `main`, not a fork of the loop.
+
+A second integration would implement:
+
+| | |
+|---|---|
+| `problem_type` / `name` | the type it serves, and what a result document calls it |
+| `languages` | what it accepts, and what to label each one |
+| `read` | which problem a version's `props` names |
+| `problem` | the judge's internal id for that problem |
+| `submit` | hand a solution over, return the judge's id for it |
+| `answers` | one request for everything still outstanding |
+| `id_of` / `problem_of` / `outcome` / `evidence` | how one answer is read |
+| `details` / `details_of_failure` | the result documents its renderer expects |
+
+**One process serves one judge.** There is one endpoint and one account in the
+configuration, deliberately: two judging systems are two deployments of this
+Runner, each with its own problem types and its own pools, which is how Runners
+already scale.
 
 ## What makes it different from `AlgoJudge-Runner`
 
@@ -33,9 +63,9 @@ Rust is not a prerequisite. `./x` runs cargo in a container pinned by digest:
     ./x test        the suite alone
     ./x run --release
 
-Everything in the suite runs offline. The tests against the archive and uHunt
-drive a recorded stand-in started in process, so **the live archive is never a
-test dependency** — which is why CI needs no services and no secrets.
+Everything in the suite runs offline. The tests against a judging system drive a
+recorded stand-in started in process, so **no live judge is ever a test
+dependency** — which is why CI needs no services and no secrets.
 
 ## Running it in a container
 
@@ -44,15 +74,15 @@ with no shell and no package manager. It is **smaller than the sandboxing
 Runner's on purpose**: that one holds the container runtime's socket and starts
 sibling containers, and this one starts nothing — so there is no socket, no
 cgroups, no scratch directory and no cache. The only state is the identity key,
-in `/var/lib/algojudge-runner-uva`, which is meant to be a volume: losing it
+in `/var/lib/algojudge-external-runner`, which is meant to be a volume: losing it
 costs a re-registration and an administrator's approval.
 
-`example-uva-development-docker-compose.yaml` raises PostgreSQL, a Server built
-from the sibling checkout, and this Runner:
+`example-development-docker-compose.yaml` raises PostgreSQL, a Server built from
+the sibling checkout, and this Runner:
 
-    docker compose -f example-uva-development-docker-compose.yaml up -d --build --wait
+    docker compose -f example-development-docker-compose.yaml up -d --build --wait
     AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1 ./x test -- --include-ignored
-    docker compose -f example-uva-development-docker-compose.yaml down -v
+    docker compose -f example-development-docker-compose.yaml down -v
 
 **This is the stack §"Running it end to end" below asks for.** Port 8098 rather
 than 8080, so it stands beside the Server's own development stack and
@@ -77,6 +107,28 @@ git-ignored and is what `./x` passes to the container as a file rather than on a
 command line, because an argument lands in the shell history and the process
 list.
 
+**Two sections, and the split is the point.** `AJ_Server__*`, `AJ_Runner__*` and
+`AJ_Lease__*` are this Runner's own and mean the same thing whatever it forwards
+to. `AJ_External__*` is the judging system it forwards to:
+
+| Variable | |
+|---|---|
+| `AJ_External__Judge` | which integration to run. `uva` is the only one built, and the default |
+| `AJ_External__BaseUrl` | where submissions are posted |
+| `AJ_External__ApiBaseUrl` | where answers are read, when that is a different service. For UVa it is uHunt |
+| `AJ_External__Username`, `AJ_External__Password` | the robot account. **Secrets**, and they have no default |
+| `AJ_External__PollMinSeconds`, `PollMaxSeconds`, `PollEscalateAfterSeconds` | how often the judge is asked |
+| `AJ_External__SubmitMinIntervalSeconds` | the gap between two submissions |
+| `AJ_External__PendingTimeoutSeconds` | how long an unanswered submission is waited for |
+| `AJ_External__MaxPending` | how many may be outstanding at once |
+
+An unknown judge is refused at start-up, by name and with the list of what this
+build knows.
+
+**`AJ_Runner__ProblemTypes` may be left unset**, and usually is: silence declares
+whatever the integration serves. Set it only to narrow or widen that
+deliberately.
+
 **`AJ_Runner__Tags` names the pools this Runner belongs to**, comma-separated.
 The Server pairs a Runner with work when the two tag lists **share at least one**
 entry, and an empty list on either side means `default` — so naming a pool takes
@@ -93,19 +145,20 @@ Changing the variable later changes nothing, deliberately.
 Two numbers are checked against each other at start-up rather than discovered an
 hour later:
 
-- **`AJ_Lease__RequestSeconds` must exceed `AJ_Uva__PendingTimeoutSeconds`.**
+- **`AJ_Lease__RequestSeconds` must exceed `AJ_External__PendingTimeoutSeconds`.**
   Otherwise the Server reclaims the job while this Runner is still waiting on the
-  archive, and the next Runner to claim it submits the same solution again.
-- **`AJ_Uva__PollMaxSeconds` must fit four times inside the lease.** A held lease
-  is renewed on the polling cycle, so slowing the polling down to be polite to
-  uHunt slows the renewing down with it — and a lease that expires between two
-  renewals is the same double submission by another route.
+  judge, and the next Runner to claim it submits the same solution again.
+- **`AJ_External__PollMaxSeconds` must fit four times inside the lease.** A held
+  lease is renewed on the polling cycle, so slowing the polling down to be polite
+  to somebody else's service slows the renewing down with it — and a lease that
+  expires between two renewals is the same double submission by another route.
 
 ## Running it end to end
 
 The whole path, against a throwaway Server. **The last step sends a real
 submission to a real service**, so it needs a robot account and a decision from
-whoever owns it.
+whoever owns it. The steps below use the UVa integration, because it is the one
+that exists.
 
 1. **A Server.** Bring one up from `AlgoJudge-Server` and turn external judging
    on — it ships **off**, and while it is off no external work is handed out at
@@ -134,14 +187,14 @@ whoever owns it.
 4. **This Runner**, pointed at that stack, then approved in the manager panel:
 
        AJ_Server__BaseUrl=http://host.docker.internal:8098/api/v1 \
-       AJ_Runner__ProblemTypes=uva@1 RUST_LOG=info ./x run --release
+       RUST_LOG=info ./x run --release
 
-   Both of those are forwarded from the host by `./x`, which is how a Runner is
-   pointed somewhere other than the stack its `.env` names.
+   That is forwarded from the host by `./x`, which is how a Runner is pointed
+   somewhere other than the stack its `.env` names.
 
 5. **Submit**, and watch:
 
-       INFO  handed to onlinejudge.org  job=… sid=31255986
+       INFO  handed over  job=… judge=onlinejudge.org sid=31255986
        INFO  resolved the archive account  uid=…
 
    The verdict arrives on the polling interval and is reported to the Server as
@@ -151,11 +204,13 @@ whoever owns it.
 to be wrong: it keeps the account's solved count honest, and it avoids the
 question of what a duplicated *accepted* solution does, which nobody has measured.
 
-## The six languages
+## The UVa integration
+
+### The six languages
 
 What onlinejudge.org offers, and what to call each of them here. **The problem
 type defines this list**, because it belongs to the archive rather than to any
-one problem: it is `src/language.rs`, and this table is that file written out.
+one problem: it is `src/uva/language.rs`, and this table is that file written out.
 
 | Id | Label | The archive's own | № |
 |---|---|---|---|
@@ -176,6 +231,17 @@ the point of forwarding.
 the archive's, pinned at the archive's versions: `cpp11-gcc` there is GCC 14 with
 our flags, and here it is GCC 5.3.0 with UVa's. Showing "C++11 (GCC)" in both
 places would tell a participant the two were built by the same compiler.
+
+**Only number 5 has been watched work.** A real submission was accepted under it
+on 2026-08-16. The other five are read off the archive's form and nobody here has
+submitted through them.
+
+### Two services, one judge
+
+Submitting is an HTML form flow behind a session cookie on `onlinejudge.org`;
+reading a verdict is a JSON API on `uhunt.onlinejudge.org`. That is why the
+configuration has both a `BaseUrl` and an `ApiBaseUrl`, and why `src/uva/` has
+`site.rs` beside `uhunt.rs`.
 
 ## Related repositories
 

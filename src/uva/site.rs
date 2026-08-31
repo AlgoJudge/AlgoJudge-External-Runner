@@ -10,28 +10,14 @@ use anyhow::{bail, Context};
 use scraper::{Html, Selector};
 
 /// Why a submission did not produce an id.
-#[derive(Debug)]
-pub enum Refused {
-    /// The session is gone — re-establish it **once** and try again.
-    ///
-    /// The proof of concept logged in before every submit, up to fifteen times
-    /// in a loop. That is two extra requests per submission against somebody
-    /// else's site, and it turns "the password is wrong" into thirty requests
-    /// and a plausible ban.
-    SessionLapsed,
-    /// Anything else. Not retried here: a second attempt at a submission the
-    /// site has already refused is a duplicate to a third party.
-    Site(String),
-}
-
-impl std::fmt::Display for Refused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SessionLapsed => write!(f, "the onlinejudge.org session had lapsed"),
-            Self::Site(why) => write!(f, "onlinejudge.org refused the submission: {why}"),
-        }
-    }
-}
+///
+/// **Every judge refuses the same two ways**, so the type is
+/// `crate::integration::Refused` and is re-exported here for the callers that
+/// think of it as this site's answer. `SessionLapsed` is the case the proof of
+/// concept got wrong: it logged in before every submit, up to fifteen times in a
+/// loop, which is two extra requests per submission against somebody else's site
+/// and turns "the password is wrong" into thirty requests and a plausible ban.
+pub use crate::integration::Refused;
 
 /// The hidden fields of the login form.
 ///
@@ -148,7 +134,7 @@ impl Site {
             http: reqwest::Client::builder()
                 .cookie_store(true)
                 .user_agent(concat!(
-                    "AlgoJudge-Runner-UVa/",
+                    "AlgoJudge-External-Runner/",
                     env!("CARGO_PKG_VERSION"),
                     " (+https://algojudge.app)"
                 ))

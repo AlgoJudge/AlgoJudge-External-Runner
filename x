@@ -20,14 +20,14 @@
 #
 set -eu
 
-IMAGE='algojudge-runner-uva-toolchain:1.97.1'
+IMAGE='algojudge-external-runner-toolchain:1.97.1'
 
 # Named volumes rather than directories in the working tree. The registry is
 # worth keeping between runs — without it every build re-downloads the index —
 # and `target/` in a volume means a container running as root never leaves
 # root-owned files behind on a Linux host.
-CARGO_VOLUME='algojudge-runner-uva-cargo'
-TARGET_VOLUME='algojudge-runner-uva-target'
+CARGO_VOLUME='algojudge-external-runner-cargo'
+TARGET_VOLUME='algojudge-external-runner-target'
 
 # Git Bash rewrites anything that looks like a path, which turns `/work` into a
 # Windows directory and the bind mount into nonsense. `cygpath` gives Docker the
