@@ -75,11 +75,10 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
     // **What it will declare, not what was configured.** An empty
     // `AJ_Runner__ProblemTypes` is the judge's own type, and a start-up line
     // showing `[]` would send an operator looking for a setting that is working.
-    let types = if config.problem_types.is_empty() {
-        vec![judge.problem_type().to_owned()]
-    } else {
-        config.problem_types.clone()
-    };
+    //
+    // The same function `admitted` registers with, rather than a second copy of
+    // its body: two of them could disagree, and nothing would say so.
+    let types = run::declared(&config, &judge);
     tracing::info!(
         name = %config.runner_name,
         judge = %config.external.judge,

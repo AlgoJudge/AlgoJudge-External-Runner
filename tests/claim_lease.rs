@@ -113,9 +113,15 @@ int main(){return 0;}
 }
 
 /// Seconds from now to an RFC 3339 instant, without pulling in a date library.
+///
+/// **This shelled out to `date -u` until 2026-08-31**, and carried two dead
+/// lines binding `SystemTime::UNIX_EPOCH` to a name it then discarded — the
+/// remains of the version that did not. A test that spawns a process to read
+/// the clock is a test that fails wherever that process is not on the path,
+/// which in this repository is every host outside the toolchain container.
+/// Unix time is UTC seconds with no leap seconds in it, so the remainder is
+/// the same seconds-of-day the subprocess printed.
 fn chrono_seconds_until(at: &str) -> f64 {
-    let parsed = std::time::SystemTime::UNIX_EPOCH;
-    let _ = parsed;
     // The Server answers RFC 3339 in UTC; only the distance matters, so this
     // reads the fields it needs rather than parsing a calendar.
     let seconds = |t: &str| -> f64 {
@@ -126,14 +132,15 @@ fn chrono_seconds_until(at: &str) -> f64 {
         let s: f64 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
         h * 3600.0 + m * 60.0 + s
     };
-    let now = std::process::Command::new("date")
-        .args(["-u", "+%Y-%m-%dT%H:%M:%S"])
-        .output()
-        .expect("a clock");
-    let now = String::from_utf8_lossy(&now.stdout).trim().to_owned();
-    let mut delta = seconds(at) - seconds(&now);
+    let now = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock")
+        .as_secs()
+        % 86_400) as f64;
+
+    let mut delta = seconds(at) - now;
     if delta < 0.0 {
-        delta += 86400.0;
+        delta += 86_400.0;
     }
     delta
 }

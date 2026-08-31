@@ -24,12 +24,9 @@ pub struct Entry {
     /// The judge's **internal** id for the problem, for verifying an answer
     /// belongs to this entry.
     pub pid: i64,
-    pub language_id: i64,
     /// When the archive accepted it. The timeout runs from here, not from the
     /// claim: waiting starts when the submission exists.
     pub sent: Instant,
-    /// Whether the Server has been told the work is running.
-    pub announced: bool,
     /// Renewal cycles in a row whose answer could not reach the Server, **for
     /// this job**.
     ///
@@ -168,9 +165,7 @@ mod tests {
             lease_token: "token".into(),
             problem_number: 100,
             pid,
-            language_id: 1,
             sent,
-            announced: false,
             unreachable: 0,
             accepted: vec!["AC".to_owned()],
             trail: Vec::new(),

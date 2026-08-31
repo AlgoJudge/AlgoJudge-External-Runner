@@ -47,7 +47,13 @@ pub const PRODUCT: &str = "algojudge-external-runner";
 ///
 /// The judge's own type unless an operator narrowed or widened it with
 /// `AJ_Runner__ProblemTypes`.
-fn declared<J: Judge>(config: &Config, judge: &J) -> Vec<String> {
+///
+/// **Public because `main` logs it and `admitted` sends it.** `main` restated
+/// this body token for token rather than calling it — a separate crate cannot
+/// reach a private function — so the two could drift, and the drift's shape is
+/// the invisible one: a start-up line telling an operator the Runner declares
+/// one thing while the registration says another, and a queue that never drains.
+pub fn declared<J: Judge>(config: &Config, judge: &J) -> Vec<String> {
     if config.problem_types.is_empty() {
         vec![judge.problem_type().to_owned()]
     } else {
@@ -357,9 +363,7 @@ impl<J: Judge> Runner<J> {
                 lease_token: job.lease_token.clone(),
                 problem_number: setup.number,
                 pid,
-                language_id: language,
                 sent: Instant::now(),
-                announced: true,
                 unreachable: 0,
                 accepted: setup.accepted,
                 trail: vec![
