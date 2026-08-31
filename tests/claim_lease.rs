@@ -79,7 +79,7 @@ int main(){return 0;}
     server
         .register(&aj_protocol::wire::Register {
             name: "claim-lease".into(),
-            product: "algojudge-runner-uva".into(),
+            product: algojudge_external_runner::run::PRODUCT.into(),
             version: "0".into(),
             public_key: identity.public_key(),
             problem_types: vec!["uva@1".into()],

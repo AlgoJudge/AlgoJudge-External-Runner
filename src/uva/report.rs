@@ -13,11 +13,17 @@
 //! have to answer, and the only way to answer it is to have recorded what the
 //! archive actually returned, when, and for which submission id. A parsed
 //! summary is not evidence; the rows are.
+//!
+//! **The document is the judge's, not the loop's.** The Client resolves a result
+//! renderer from `type`, so the shape below is a contract between `uva@1` and
+//! that renderer — which is why it lives here rather than in something shared.
 
 use serde_json::json;
 
+use super::uhunt::Row;
+use super::verdict::COMPILATION_ERROR;
+use super::{JUDGE, PROBLEM_TYPE};
 use crate::pending::Entry;
-use crate::uva::uhunt::Row;
 
 /// The result document, as the `uva@1` renderer reads it.
 ///
@@ -38,11 +44,11 @@ pub fn details(
     solved: bool,
 ) -> serde_json::Value {
     json!({
-        "type": "uva@1",
+        "type": PROBLEM_TYPE,
         "score": if solved { 1 } else { 0 },
         "maxScore": 1,
         "external": {
-            "judge": "onlinejudge.org",
+            "judge": JUDGE,
             "problemNumber": entry.problem_number,
             "submissionId": row.sid,
             "verdictId": row.verdict_id,
@@ -56,7 +62,7 @@ pub fn details(
         // **No compiler log, and that is measured rather than assumed**: the site
         // provides compiler output by email and excludes warnings, so there is
         // nothing here to fetch. The status is all that can honestly be said.
-        "compilation": { "status": if row.verdict_id == 30 { "ERROR" } else { "OK" } },
+        "compilation": { "status": if row.verdict_id == COMPILATION_ERROR { "ERROR" } else { "OK" } },
     })
 }
 
@@ -66,9 +72,9 @@ pub fn details(
 /// the case somebody will ask about, and "it did not work" is not an answer.
 pub fn details_of_failure(entry: &Entry, sid: i64, why: &str) -> serde_json::Value {
     json!({
-        "type": "uva@1",
+        "type": PROBLEM_TYPE,
         "external": {
-            "judge": "onlinejudge.org",
+            "judge": JUDGE,
             "problemNumber": entry.problem_number,
             "submissionId": sid,
         },
@@ -126,6 +132,15 @@ mod tests {
         assert_eq!(document["external"]["verdictAbbr"], "AC");
         assert_eq!(document["score"], 1);
         assert_eq!(document["maxScore"], 1, "binary, on a scale of one");
+    }
+
+    /// The renderer resolves on these two, so they are pinned rather than
+    /// left to whatever the judge happens to be called this week.
+    #[test]
+    fn the_document_names_the_type_and_the_judge() {
+        let document = details(&entry(), &row(90, 60), "Accepted", "AC", true);
+        assert_eq!(document["type"], "uva@1");
+        assert_eq!(document["external"]["judge"], "onlinejudge.org");
     }
 
     /// A verdict the activity does not count is still the archive's verdict.

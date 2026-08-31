@@ -52,8 +52,9 @@ fn unique(prefix: &str) -> String {
 /// failed in twenty-one milliseconds said only "failed", and the one sentence
 /// naming the reason was written and thrown away. `RUST_LOG` still overrides.
 pub fn logs() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("algojudge_runner_uva=debug,info"));
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("algojudge_external_runner=debug,info")
+    });
     // Not `init`: two tests in one binary would each try, and the second would
     // panic on an installed global.
     let _ = tracing_subscriber::fmt()

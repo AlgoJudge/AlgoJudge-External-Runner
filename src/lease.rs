@@ -10,17 +10,19 @@
 //! shortest lease the Server grants, and a wait past the reaper's sweep.
 //!
 //! **What is still this module's own is why it needs one.** A local evaluation
-//! finishes inside a lease. This Runner waits up to fifteen minutes on an
-//! archive it does not control, so a job left on a lease it never extends is
+//! finishes inside a lease. This Runner waits up to fifteen minutes on a judging
+//! system it does not control, so a job left on a lease it never extends is
 //! reclaimed by the Server, handed to the next Runner, and **submitted to
-//! onlinejudge.org a second time**. That is the failure this module exists for.
+//! somebody else's service a second time**. That is the failure this module
+//! exists for.
 //!
 //! **And one difference is worth copying back.** That keeper renews on a timer
 //! of its own — a quarter of the lease the Server actually *granted*. This
-//! module renews at the top of the archive-polling cycle, computed from the
+//! module renews at the top of the judge-polling cycle, computed from the
 //! lease it *asked for*. Riding the poll cycle is why
 //! `Config::refuse_what_cannot_work` needs its four-times rule at all: raising
-//! `AJ_Uva__PollMaxSeconds` to be polite to uHunt stretches renewal with it.
+//! `AJ_External__PollMaxSeconds` to be polite to somebody else's service
+//! stretches renewal with it.
 //! Reading the granted lease is the sturdier half, and the two really could
 //! differ until 2026-08-23, when the Server stopped replacing a claimed lease
 //! with its own default on the first progress report.
@@ -31,6 +33,9 @@
 //! second opinion about when a lease expires. The cycle is at most sixty seconds
 //! against a lease of twenty minutes, which leaves nineteen failed renewals of
 //! slack before anything is at risk.
+//!
+//! Nothing here names a judging system: the lease is between this Runner and the
+//! Server, and what it is being held *for* is the integration's business.
 
 /// What the Server's answer to a renewal means for the job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +65,7 @@ impl Standing {
 /// What to do about a held submission after a renewal attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Carry on waiting for the archive.
+    /// Carry on waiting for the judge.
     KeepWaiting,
     /// Forget it **without reporting anything**.
     ///

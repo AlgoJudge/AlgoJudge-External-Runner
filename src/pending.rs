@@ -1,9 +1,10 @@
-//! What has been sent to the archive and not yet answered for.
+//! What has been sent to a judge and not yet answered for.
 //!
-//! **Keyed on the external submission id and on nothing else.** Everything a row
-//! also carries — the problem, the language, the timestamp — is used to *verify*
-//! a match, never to make one: a row whose problem disagrees with the entry it
-//! matched is a defect worth shouting about, not a match to accept quietly.
+//! **Keyed on the external submission id and on nothing else.** Everything an
+//! answer also carries — the problem, the language, the timestamp — is used to
+//! *verify* a match, never to make one: an answer whose problem disagrees with
+//! the entry it matched is a defect worth shouting about, not a match to accept
+//! quietly.
 //!
 //! The set lives in memory. A restart loses it, which the Server handles by
 //! reclaiming the lease and requeueing the job — correct, and it costs one extra
@@ -13,8 +14,6 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crate::uva::uhunt::Row;
-
 /// One submission the archive owes us an answer for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -22,7 +21,8 @@ pub struct Entry {
     pub lease_token: String,
     /// The public number, for the message a person reads.
     pub problem_number: i64,
-    /// uHunt's internal id, for verifying a row belongs to this entry.
+    /// The judge's **internal** id for the problem, for verifying an answer
+    /// belongs to this entry.
     pub pid: i64,
     pub language_id: i64,
     /// When the archive accepted it. The timeout runs from here, not from the
@@ -46,12 +46,12 @@ pub struct Pending {
     entries: BTreeMap<i64, Entry>,
 }
 
-/// What a row turned out to be.
+/// What an answer turned out to be.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Matched<'a> {
-    /// Ours, and the row agrees with what we sent.
+    /// Ours, and the answer agrees with what we sent.
     Ours(&'a Entry),
-    /// Ours by id, but the row describes a different problem.
+    /// Ours by id, but the answer describes a different problem.
     ///
     /// Not accepted as a match. The account is shared and ids are global, so the
     /// honest reading is that something is wrong with our own bookkeeping.
@@ -96,13 +96,18 @@ impl Pending {
         self.entries.get_mut(&sid)
     }
 
-    /// What this row is to us.
-    pub fn matched(&self, row: &Row) -> Matched<'_> {
-        match self.entries.get(&row.sid) {
+    /// What this answer is to us.
+    ///
+    /// **The two numbers, not the judge's whole answer.** Everything else an
+    /// answer carries is the judge's own shape; these two are all a match is
+    /// ever made or refused on, which is what keeps this type free of any
+    /// particular judge.
+    pub fn matched(&self, id: i64, problem: i64) -> Matched<'_> {
+        match self.entries.get(&id) {
             None => Matched::Stranger,
-            Some(entry) if entry.pid != row.pid => Matched::Disagrees {
+            Some(entry) if entry.pid != problem => Matched::Disagrees {
                 expected: entry.pid,
-                found: row.pid,
+                found: problem,
             },
             Some(entry) => Matched::Ours(entry),
         }
@@ -140,32 +145,18 @@ mod tests {
         }
     }
 
-    fn row(sid: i64, pid: i64, verdict_id: i64) -> Row {
-        Row {
-            sid,
-            pid,
-            verdict_id,
-            runtime_ms: 0,
-            submitted_at: 0,
-            language_id: 1,
-        }
-    }
-
     /// The account is shared. Somebody signing in by hand must not break a poll.
     #[test]
     fn a_row_we_did_not_send_is_not_ours_and_not_an_error() {
         let pending = Pending::default();
-        assert_eq!(pending.matched(&row(31254725, 36, 90)), Matched::Stranger);
+        assert_eq!(pending.matched(31254725, 36), Matched::Stranger);
     }
 
     #[test]
     fn a_row_we_sent_is_matched_by_its_id() {
         let mut pending = Pending::default();
         pending.insert(31254724, entry(36, Instant::now()));
-        assert!(matches!(
-            pending.matched(&row(31254724, 36, 70)),
-            Matched::Ours(_)
-        ));
+        assert!(matches!(pending.matched(31254724, 36), Matched::Ours(_)));
     }
 
     /// The one case that is neither ours nor a stranger, and it means a defect.
@@ -174,7 +165,7 @@ mod tests {
         let mut pending = Pending::default();
         pending.insert(31254724, entry(36, Instant::now()));
         assert_eq!(
-            pending.matched(&row(31254724, 4838, 90)),
+            pending.matched(31254724, 4838),
             Matched::Disagrees {
                 expected: 36,
                 found: 4838
@@ -194,25 +185,26 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_set_has_no_cursor_and_nothing_late() {
+    fn an_empty_set_has_nothing_outstanding_and_nothing_late() {
         let pending = Pending::default();
         assert!(pending.is_empty());
-        assert_eq!(crate::uva::uhunt::cursor(pending.sids()), None);
+        assert_eq!(pending.sids().next(), None);
         assert!(pending
             .timed_out(Duration::from_secs(900), Instant::now())
             .is_empty());
     }
 
-    /// The cursor reads the set rather than a number kept beside it.
+    /// The outstanding ids are read off the set rather than kept beside it,
+    /// which is what lets a judge derive its own cursor from them.
     #[test]
-    fn the_cursor_follows_the_set() {
+    fn the_outstanding_ids_follow_the_set() {
         let now = Instant::now();
         let mut pending = Pending::default();
         pending.insert(300, entry(36, now));
         pending.insert(100, entry(36, now));
-        assert_eq!(crate::uva::uhunt::cursor(pending.sids()), Some(99));
+        assert_eq!(pending.sids().collect::<Vec<_>>(), vec![100, 300]);
 
         pending.take(100);
-        assert_eq!(crate::uva::uhunt::cursor(pending.sids()), Some(299));
+        assert_eq!(pending.sids().collect::<Vec<_>>(), vec![300]);
     }
 }

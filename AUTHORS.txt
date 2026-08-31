@@ -1,4 +1,4 @@
-AlgoJudge-Runner-UVa authors
+AlgoJudge-External-Runner authors
 
 The people whose commits are in this repository, ordered by number of
 commits. Names and addresses come from the Git history, with alternate

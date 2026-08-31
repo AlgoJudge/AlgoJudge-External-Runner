@@ -187,10 +187,10 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
 
     let mut config = probe_config(&site.uri(), &hunt.uri());
     config.lease_seconds = 80;
-    config.pending_timeout = 300;
-    config.poll_min = 20;
-    config.poll_max = 20;
-    config.poll_escalate_after = 20;
+    config.external.pending_timeout = 300;
+    config.external.poll_min = 20;
+    config.external.poll_max = 20;
+    config.external.poll_escalate_after = 20;
 
     let identity = aj_protocol::Identity::load_or_create(&config.key_path).expect("an identity");
     let server = aj_protocol::Server::new(&config.server_base_url).expect("a Server");
@@ -218,7 +218,10 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
             }
         }
     });
-    algojudge_runner_uva::run::admitted(&server, &identity, &config)
+    // The judge is built before admission because registration declares what it
+    // serves: an empty `AJ_Runner__ProblemTypes` is the judge's own type.
+    let judge = probe_judge(&site.uri(), &hunt.uri());
+    algojudge_external_runner::run::admitted(&server, &identity, &config, &judge)
         .await
         .expect("being admitted");
     approving.abort();
@@ -228,29 +231,7 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
         std::env::temp_dir().join("lease-probe-cache"),
         64 * 1024 * 1024,
     ));
-    let mut runner = algojudge_runner_uva::run::Runner::new(
-        server,
-        cache,
-        algojudge_runner_uva::uva::site::Site::new(
-            format!("{}/", site.uri()),
-            "robot".into(),
-            "not-a-real-password".into(),
-        )
-        .expect("a site client"),
-        algojudge_runner_uva::uva::uhunt::Uhunt::new(
-            reqwest::Client::new(),
-            // **The origin, with no `api/`.** `Uhunt::text` appends that itself,
-            // so a base already carrying it asks for `/api/api/p/num/100`, which
-            // the stand-in does not serve — and a 404 from uHunt is reported as
-            // an infrastructure failure, so the job settled in twenty-one
-            // milliseconds instead of being held. `probe_config` had it right
-            // and this line did not.
-            format!("{}/", hunt.uri()),
-        ),
-        config,
-        // Given rather than resolved, so the stand-in needs no account lookup.
-        Some(1),
-    );
+    let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
 
     let working = tokio::spawn(async move {
         // Reported rather than swallowed: this returning at all is a fault, and
@@ -355,28 +336,57 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
     );
 }
 
-fn probe_config(site: &str, hunt: &str) -> algojudge_runner_uva::config::Config {
-    algojudge_runner_uva::config::Config {
+fn probe_config(site: &str, hunt: &str) -> algojudge_external_runner::config::Config {
+    algojudge_external_runner::config::Config {
         server_base_url: stack::api(),
         runner_name: "lease-probe".into(),
-        problem_types: vec!["uva@1".into()],
+        // Empty is the judge's own type, which is what a deployment gets.
+        problem_types: vec![],
         tags: vec![],
         key_path: std::env::temp_dir()
             .join(format!("lease-probe-{}.key", std::process::id()))
             .to_string_lossy()
             .into_owned(),
-        uva_base_url: format!("{site}/"),
-        uhunt_base_url: format!("{hunt}/"),
-        uva_username: "robot".into(),
-        uva_password: "not-a-real-password".into(),
-        uva_user_id: Some(1),
-        poll_min: 20,
-        poll_max: 20,
-        poll_escalate_after: 20,
-        submit_min_interval: 1,
-        pending_timeout: 300,
-        max_pending: 20,
-        long_poll_enabled: false,
         lease_seconds: 80,
+        external: algojudge_external_runner::config::External {
+            judge: "uva".into(),
+            base_url: format!("{site}/"),
+            api_base_url: format!("{hunt}/"),
+            username: "robot".into(),
+            password: "not-a-real-password".into(),
+            user_id: Some(1),
+            poll_min: 20,
+            poll_max: 20,
+            poll_escalate_after: 20,
+            submit_min_interval: 1,
+            pending_timeout: 300,
+            max_pending: 20,
+            long_poll_enabled: false,
+        },
     }
+}
+
+/// The judge the probe drives, pointed at the two stand-ins.
+///
+/// **The origin, with no `api/`.** `Uhunt::text` appends that itself, so a base
+/// already carrying it asks for `/api/api/p/num/100`, which the stand-in does not
+/// serve — and a 404 from uHunt is reported as an infrastructure failure, so the
+/// job settled in twenty-one milliseconds instead of being held. `probe_config`
+/// had it right and the construction beside it did not.
+fn probe_judge(site: &str, hunt: &str) -> algojudge_external_runner::uva::Uva {
+    algojudge_external_runner::uva::Uva::new(
+        algojudge_external_runner::uva::site::Site::new(
+            format!("{site}/"),
+            "robot".into(),
+            "not-a-real-password".into(),
+        )
+        .expect("a site client"),
+        algojudge_external_runner::uva::uhunt::Uhunt::new(
+            reqwest::Client::new(),
+            format!("{hunt}/"),
+        ),
+        "robot".into(),
+        // Given rather than resolved, so the stand-in needs no account lookup.
+        Some(1),
+    )
 }

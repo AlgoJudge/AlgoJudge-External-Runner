@@ -1,9 +1,9 @@
 # PostgreSQL, the Server and this Runner, for development and for the tests that
 # need all three.
 #
-#   docker compose -f example-uva-development-docker-compose.yaml up -d --build --wait
+#   docker compose -f example-development-docker-compose.yaml up -d --build --wait
 #   AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1 ./x test -- --include-ignored
-#   docker compose -f example-uva-development-docker-compose.yaml down -v
+#   docker compose -f example-development-docker-compose.yaml down -v
 #
 # **This is the stack the README asked for.** Every integration test here is
 # `#[ignore]`d and needs `AJ_TEST_SERVER`, so CI runs none of them and a
@@ -12,10 +12,10 @@
 # is that file. It builds the Server from a sibling checkout, so it needs
 # `AlgoJudge-Server` beside this repository.
 #
-# **Not the production stack.** That belongs in `AlgoJudge-Ops` and does not
-# exist yet. Port 8098 rather than 8080 so this can stand beside the Server's own
-# development stack and AlgoJudge-Runner's without either taking the other's
-# port; it is the port this repository's tests and README already name.
+# **Not the production stack.** That belongs in `AlgoJudge-Ops`, which does not
+# carry this image yet. Port 8098 rather than 8080 so this can stand beside the
+# Server's own development stack and AlgoJudge-Runner's without either taking the
+# other's port; it is the port this repository's tests and README already name.
 #
 # **Two things this file cannot do for you**, and both stop the queue dead:
 #
@@ -27,10 +27,14 @@
 #      approves it in the panel. That is the trust decision the whole design
 #      rests on and it is deliberately not automatable.
 #
+# **It runs the UVa integration**, which is the only one there is. A second
+# judging system would be a second service here, with its own account and its
+# own problem types, rather than another setting on this one.
+#
 # README §"Running it end to end" carries the rest: a problem with
 # `props.uva.problemNumber`, an activity, an opened round, somebody enrolled.
 
-name: algojudge-runner-uva-dev
+name: algojudge-external-runner-dev
 
 services:
   postgres:
@@ -40,7 +44,7 @@ services:
     # `/var/lib/postgresql/18/docker`, and mounting the inner path shadows the
     # version directory the image creates.
     volumes:
-      - algojudge_uva_dev_db:/var/lib/postgresql
+      - algojudge_external_dev_db:/var/lib/postgresql
     environment:
       POSTGRES_PASSWORD: algojudge
       POSTGRES_USER: algojudge
@@ -77,33 +81,33 @@ services:
       AJ_Storage__Stores__objects__Kind: postgres
       AJ_Admin__Token: ${AJ_ADMIN_TOKEN:-admin-token-development-only}
 
-  uva-runner:
+  external-runner:
     build:
       context: .
     restart: unless-stopped
     depends_on:
       server:
         condition: service_healthy
-    # **The archive account, and it is not in this file.** `.env` is git-ignored
-    # and is where `AJ_Uva__Username` and `AJ_Uva__Password` live — the same file
-    # `./x` already passes, and passed as a file rather than on a command line
-    # because an argument lands in the shell history and the process list.
-    # `.env.example` lists both and gives neither a value.
+    # **The judge's account, and it is not in this file.** `.env` is git-ignored
+    # and is where `AJ_External__Username` and `AJ_External__Password` live — the
+    # same file `./x` already passes, and passed as a file rather than on a
+    # command line because an argument lands in the shell history and the process
+    # list. `.env.example` lists both and gives neither a value.
     env_file:
       - .env
     environment:
       # The compose network name, not localhost: this is the Runner's own view of
       # the Server, and it is a different address from the browser's.
       AJ_Server__BaseUrl: http://server:8080/api/v1
-      AJ_Runner__Name: uva-runner-dev
-      AJ_Runner__ProblemTypes: uva@1
+      AJ_Runner__Name: external-runner-dev
+      AJ_External__Judge: uva
       # **Stated here because `.env` is not written for this container.** That
       # file is `./x`'s environment, and `./x` mounts the source at `/work`, so
       # the key path in it points inside the source tree — which this image has
       # no business writing to and, running as `nonroot`, cannot. `environment`
       # takes precedence over `env_file`, so naming the image's own path here is
       # what makes the same `.env` serve both.
-      AJ_Runner__KeyPath: /var/lib/algojudge-runner-uva/identity.key
+      AJ_Runner__KeyPath: /var/lib/algojudge-external-runner/identity.key
       # Which pools this Runner belongs to, comma-separated. Left unset it is in
       # `default`, which is where every untagged activity's work is.
       #
@@ -116,19 +120,19 @@ services:
       # **The two numbers the Runner checks against each other at start-up**,
       # rather than letting them disagree and discovering it an hour later. The
       # lease must outlast a pending submission, or the Server reclaims the job
-      # while the archive is still thinking and the next Runner submits the same
+      # while the judge is still thinking and the next Runner submits the same
       # solution again; and the polling interval must fit four times inside the
       # lease, because a held lease is renewed on the polling cycle. Slowing the
-      # polling to be polite to uHunt slows the renewing with it.
+      # polling to be polite to somebody else's service slows the renewing with it.
       AJ_Lease__RequestSeconds: "1200"
-      AJ_Uva__PendingTimeoutSeconds: "900"
-      AJ_Uva__PollMaxSeconds: "60"
+      AJ_External__PendingTimeoutSeconds: "900"
+      AJ_External__PollMaxSeconds: "60"
       RUST_LOG: info
     volumes:
       # The key is the identity. Losing it costs a re-registration and an
       # administrator's approval, so it outlives the container.
-      - algojudge_uva_dev_identity:/var/lib/algojudge-runner-uva
+      - algojudge_external_dev_identity:/var/lib/algojudge-external-runner
 
 volumes:
-  algojudge_uva_dev_db:
-  algojudge_uva_dev_identity:
+  algojudge_external_dev_db:
+  algojudge_external_dev_identity:

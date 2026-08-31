@@ -1,10 +1,10 @@
-# The UVa Runner, as one static binary in an image with nothing else in it.
+# The external Runner, as one static binary in an image with nothing else in it.
 #
 # **Smaller than the sandboxing Runner's, and deliberately so.** That one holds
 # the container runtime's socket and starts sibling containers; this one starts
-# nothing and runs nothing. It logs in to onlinejudge.org, posts a form, and
-# polls uHunt for the verdict — so it needs no socket, no cgroups, no scratch
-# directory, and no privileges of any kind.
+# nothing and runs nothing. It signs in to somebody else's judging system, hands
+# a submission over, and asks what it decided — so it needs no socket, no
+# cgroups, no scratch directory, and no privileges of any kind.
 #
 # `musl` rather than glibc so the binary carries no dynamic loader, which is what
 # lets the final stage be a distroless image with no shell and no package
@@ -50,18 +50,18 @@ RUN mkdir -p /state/lib
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build \
-    /src/target/x86_64-unknown-linux-musl/release/algojudge-runner-uva \
-    /usr/local/bin/algojudge-runner-uva
+    /src/target/x86_64-unknown-linux-musl/release/algojudge-external-runner \
+    /usr/local/bin/algojudge-external-runner
 
-COPY --from=build --chown=65532:65532 /state/lib /var/lib/algojudge-runner-uva
+COPY --from=build --chown=65532:65532 /state/lib /var/lib/algojudge-external-runner
 
 # The identity is the only state there is, and it is meant to be a volume: losing
 # it costs a re-registration and an administrator's approval. There is no package
 # cache here — this Runner downloads no packages, because it evaluates nothing.
-ENV AJ_Runner__KeyPath=/var/lib/algojudge-runner-uva/identity.key
+ENV AJ_Runner__KeyPath=/var/lib/algojudge-external-runner/identity.key
 
 # No port is published and none is listened on. This Runner dials out twice — to
-# the Server and to the archive — and accepts nothing.
+# the Server and to the judging system — and accepts nothing.
 
 USER nonroot
-ENTRYPOINT ["/usr/local/bin/algojudge-runner-uva"]
+ENTRYPOINT ["/usr/local/bin/algojudge-external-runner"]

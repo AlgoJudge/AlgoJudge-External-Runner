@@ -1,11 +1,11 @@
 [package]
-name = "algojudge-runner-uva"
-description = "A Runner that forwards uva@1 submissions to onlinejudge.org and reports the archive's verdict."
+name = "algojudge-external-runner"
+description = "A Runner that forwards submissions to external judging systems and reports their verdicts. UVa Online Judge is the integration it has."
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
 license = "MIT"
-repository = "https://github.com/AlgoJudge/AlgoJudge-Runner-UVa"
+repository = "https://github.com/AlgoJudge/AlgoJudge-External-Runner"
 
 [dependencies]
 # The Server–Runner contract, pinned by revision. `AlgoJudge-Runner` publishes no
@@ -16,7 +16,8 @@ aj-protocol = { git = "https://github.com/AlgoJudge/AlgoJudge-Runner", rev = "61
 
 anyhow = "1.0"
 # `cookies` is the one feature this Runner needs that the sandboxing Runner does
-# not: onlinejudge.org is an HTML form flow behind a session cookie, not an API.
+# not: the UVa integration is an HTML form flow behind a session cookie, not an
+# API. A judging system with a real API would need none of it.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "cookies",
@@ -33,9 +34,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-# A recorded stand-in for onlinejudge.org and uHunt. The live archive is never a
-# test dependency: it is somebody else's infrastructure and it is not ours to
-# hammer on every commit.
+# A recorded stand-in for whatever an integration talks to. A live judging
+# system is never a test dependency: it is somebody else's infrastructure and it
+# is not ours to hammer on every commit.
 wiremock = "0.6"
 # Standing a Server up the way a person would: a session cookie, and a
 # multipart body for a submission. Both are features the Runner itself has no

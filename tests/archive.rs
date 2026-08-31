@@ -51,8 +51,8 @@ async fn site_answering(server: &MockServer, submission: ResponseTemplate) {
         .await;
 }
 
-fn site(base: &str) -> algojudge_runner_uva::uva::site::Site {
-    algojudge_runner_uva::uva::site::Site::new(
+fn site(base: &str) -> algojudge_external_runner::uva::site::Site {
+    algojudge_external_runner::uva::site::Site::new(
         format!("{base}/"),
         "robot".into(),
         "not-a-real-password".into(),
@@ -109,7 +109,7 @@ async fn a_lapsed_session_is_re_established_once_and_not_fifteen_times() {
     assert!(
         matches!(
             refused,
-            algojudge_runner_uva::uva::site::Refused::SessionLapsed
+            algojudge_external_runner::uva::site::Refused::SessionLapsed
         ),
         "{refused}"
     );
@@ -166,8 +166,8 @@ async fn two_submissions_do_not_overlap_and_keep_their_distance() {
 
 // ------------------------------------------------------------------------ uHunt
 
-fn uhunt(base: &str) -> algojudge_runner_uva::uva::uhunt::Uhunt {
-    algojudge_runner_uva::uva::uhunt::Uhunt::new(reqwest::Client::new(), format!("{base}/"))
+fn uhunt(base: &str) -> algojudge_external_runner::uva::uhunt::Uhunt {
+    algojudge_external_runner::uva::uhunt::Uhunt::new(reqwest::Client::new(), format!("{base}/"))
 }
 
 /// The real answer, captured 2026-08-16.

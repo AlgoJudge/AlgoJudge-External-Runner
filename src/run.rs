@@ -1,10 +1,14 @@
-//! The loop: take work, hand it to the archive, wait, report.
+//! The loop: take work, hand it to the judge, wait, report.
 //!
 //! **One loop with two clocks**, rather than two tasks with a lock between them.
 //! Asking our own Server for work is cheap and may be frequent; asking somebody
-//! else's archive is neither, and is floored at twenty seconds. Keeping both in
+//! else's judge is neither, and is floored at twenty seconds. Keeping both in
 //! one place means the pending set needs no synchronisation and the order of
 //! operations is on the screen rather than in a scheduler.
+//!
+//! **Nothing here names an archive.** Every reach outside the installation goes
+//! through `crate::integration::Judge`, so adding a second judging system is a
+//! module beside `crate::uva` rather than a change to this file.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,28 +17,48 @@ use aj_protocol::wire::{AttachToJob, ClaimedJob, Register, ReportResult};
 use aj_protocol::{Backoff, Cache, Identity, Server};
 
 use crate::config::Config;
+use crate::integration::{Chosen, Judge, Outcome, Refused};
 use crate::lease::{self, Action, Standing};
 use crate::pending::{Entry, Matched, Pending};
-use crate::problem;
-use crate::uva::site::{Refused, Site};
-use crate::uva::uhunt::{self, Uhunt};
-use crate::verdict::{self, Outcome};
+
+/// What the Server records this Runner as being.
+///
+/// One string for every judge: what varies is which problem types it declares,
+/// and the Server already stores those.
+pub const PRODUCT: &str = "algojudge-external-runner";
+
+/// What this Runner declares it serves.
+///
+/// The judge's own type unless an operator narrowed or widened it with
+/// `AJ_Runner__ProblemTypes`.
+fn declared<J: Judge>(config: &Config, judge: &J) -> Vec<String> {
+    if config.problem_types.is_empty() {
+        vec![judge.problem_type().to_owned()]
+    } else {
+        config.problem_types.clone()
+    }
+}
 
 /// Registered and holding a token, however long that takes.
-pub async fn admitted(server: &Server, identity: &Identity, config: &Config) -> anyhow::Result<()> {
+pub async fn admitted<J: Judge>(
+    server: &Server,
+    identity: &Identity,
+    config: &Config,
+    judge: &J,
+) -> anyhow::Result<()> {
     let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(60));
 
     loop {
         let asked = server
             .register(&Register {
                 name: config.runner_name.clone(),
-                product: "algojudge-runner-uva".into(),
+                product: PRODUCT.into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 public_key: identity.public_key(),
-                problem_types: config.problem_types.clone(),
+                problem_types: declared(config, judge),
                 // **The whole point of this Runner, declared.** Every submission
                 // it takes leaves the installation, and the Server pairs work with
-                // workers on this: without it a `uva@1` problem is never handed
+                // workers on this: without it an external problem is never handed
                 // over, and the queue simply looks empty.
                 external: true,
                 tags: config.tags.clone(),
@@ -73,63 +97,42 @@ pub async fn admitted(server: &Server, identity: &Identity, config: &Config) -> 
     }
 }
 
-pub struct Runner {
+pub struct Runner<J: Judge> {
     pub server: Server,
     pub cache: Arc<Cache>,
-    pub site: Site,
-    pub uhunt: Uhunt,
+    pub judge: J,
     pub config: Config,
-    /// Resolved on first need, not at start-up.
-    ///
-    /// **A Runner that starts while the archive is down must still register and
-    /// wait** — the specification says so, and resolving this eagerly made an
-    /// unreachable uHunt into a Runner that never appeared in the manager panel
-    /// at all. It is needed to poll, and polling only happens once something has
-    /// been submitted.
-    uid: Option<u64>,
     pending: Pending,
-    /// Public number to uHunt's internal id. Ours to re-derive, not to depend on.
-    numbers: std::collections::BTreeMap<i64, i64>,
     /// Renewal attempts in a row that could not reach the Server.
     unreachable: u32,
 }
 
-impl Runner {
-    pub fn new(
-        server: Server,
-        cache: Arc<Cache>,
-        site: Site,
-        uhunt: Uhunt,
-        config: Config,
-        uid: Option<u64>,
-    ) -> Self {
+impl<J: Judge> Runner<J> {
+    pub fn new(server: Server, cache: Arc<Cache>, judge: J, config: Config) -> Self {
         Self {
             server,
             cache,
-            site,
-            uhunt,
+            judge,
             config,
-            uid,
             pending: Pending::default(),
-            numbers: std::collections::BTreeMap::new(),
             unreachable: 0,
         }
     }
 
     pub async fn work(&mut self, identity: &Identity) -> anyhow::Result<()> {
         let mut claiming = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
-        let mut ask_archive_at = Instant::now();
+        let mut ask_judge_at = Instant::now();
         let mut beat_at = Instant::now();
 
         loop {
-            if !self.pending.is_empty() && Instant::now() >= ask_archive_at {
+            if !self.pending.is_empty() && Instant::now() >= ask_judge_at {
                 self.renew_everything().await;
                 self.harvest().await;
                 self.expire().await;
-                ask_archive_at = Instant::now() + self.cycle();
+                ask_judge_at = Instant::now() + self.cycle();
             }
 
-            if self.pending.len() < self.config.max_pending {
+            if self.pending.len() < self.config.external.max_pending {
                 match self.server.claim(Some(self.config.lease_seconds)).await {
                     Ok(Some(job)) => {
                         // **Asked and granted, side by side.** The Server may
@@ -150,7 +153,7 @@ impl Runner {
                     Ok(None) => {}
                     Err(e) if e.needs_handshake() => {
                         self.server.forget_token();
-                        admitted(&self.server, identity, &self.config).await?;
+                        admitted(&self.server, identity, &self.config, &self.judge).await?;
                         continue;
                     }
                     Err(e) => tracing::warn!(%e, "could not ask for work"),
@@ -165,17 +168,17 @@ impl Runner {
             }
 
             // Nothing outstanding: sleep as the ordinary Runner does. Something
-            // outstanding: wake in time for the archive, and no later.
+            // outstanding: wake in time for the judge, and no later.
             if self.pending.is_empty() {
                 claiming.wait().await;
             } else {
-                let until = ask_archive_at.saturating_duration_since(Instant::now());
+                let until = ask_judge_at.saturating_duration_since(Instant::now());
                 tokio::time::sleep(until.min(Duration::from_secs(5))).await;
             }
         }
     }
 
-    /// How long until the archive is asked again.
+    /// How long until the judge is asked again.
     ///
     /// **The long-poll trigger is not built yet**, so the interval is computed as
     /// if the accelerator were off — which is what makes escalation earn its
@@ -190,9 +193,9 @@ impl Runner {
         crate::schedule::interval(
             false,
             oldest,
-            Duration::from_secs(self.config.poll_min),
-            Duration::from_secs(self.config.poll_max),
-            Duration::from_secs(self.config.poll_escalate_after),
+            Duration::from_secs(self.config.external.poll_min),
+            Duration::from_secs(self.config.external.poll_max),
+            Duration::from_secs(self.config.external.poll_escalate_after),
         )
     }
 
@@ -202,7 +205,7 @@ impl Runner {
 
         // **A language the assignment excluded is a verdict, not a failure**,
         // and it is decided before anything is forwarded — nothing should reach
-        // onlinejudge.org that the activity's own rules already refuse.
+        // the judge that the activity's own rules already refuse.
         //
         // The same answer `standard-io@1` gives for the same mistake: the
         // participant chose it, their code may be perfect, and what they broke
@@ -213,7 +216,7 @@ impl Runner {
             tracing::info!(job = %job.job_id, %refusal, "refused by the activity's rules");
             self.send(
                 &job.job_id,
-                &ReportResult::judged(&token, 0.0, 1.0, verdict::POLICY_VIOLATION),
+                &ReportResult::judged(&token, 0.0, 1.0, crate::integration::POLICY_VIOLATION),
             )
             .await;
             return;
@@ -224,7 +227,12 @@ impl Runner {
                 if let Err(e) = self.server.progress(&job.job_id, &token).await {
                     tracing::warn!(%e, "could not say the work had started");
                 }
-                tracing::info!(job = %job.job_id, sid = entry.0, "handed to onlinejudge.org");
+                tracing::info!(
+                    job = %job.job_id,
+                    judge = self.judge.name(),
+                    sid = entry.0,
+                    "handed over",
+                );
                 self.pending.insert(entry.0, entry.1);
             }
             Err(why) => {
@@ -242,13 +250,15 @@ impl Runner {
         // Not this check's business. `forward` reports an unreadable
         // configuration as the infrastructure failure it is, with the message
         // that names the missing field.
-        let Ok(setup) = problem::read(job.problem_version_props.as_ref(), job.config.as_ref())
+        let Ok(setup) = self
+            .judge
+            .read(job.problem_version_props.as_ref(), job.config.as_ref())
         else {
             return Ok(());
         };
 
-        match setup.language(language_of(job.props.as_ref())) {
-            problem::Chosen::NotAllowed { wanted, allowed } => Err(format!(
+        match self.judge.language(&setup, language_of(job.props.as_ref())) {
+            Chosen::NotAllowed { wanted, allowed } => Err(format!(
                 "this problem does not accept {wanted} here; it accepts {allowed:?}"
             )),
             _ => Ok(()),
@@ -258,36 +268,25 @@ impl Runner {
     async fn forward(&mut self, job: &ClaimedJob) -> anyhow::Result<(i64, Entry)> {
         // Two documents, two questions: the version says which problem, the
         // assignment says how this course counts it.
-        let setup = problem::read(job.problem_version_props.as_ref(), job.config.as_ref())?;
+        let setup = self
+            .judge
+            .read(job.problem_version_props.as_ref(), job.config.as_ref())?;
 
         // `props.language`, since 2026-08-22. The Server carries the document
         // without reading a member of it, so which member names the language is
-        // the problem type's to know — and `uva@1` calls it the same thing
-        // `standard-io@1` does.
-        let language = match setup.language(language_of(job.props.as_ref())) {
-            problem::Chosen::Accepted(number) => number,
+        // the problem type's to know — and an external type calls it the same
+        // thing `standard-io@1` does.
+        let language = match self.judge.language(&setup, language_of(job.props.as_ref())) {
+            Chosen::Accepted(number) => number,
             // Refused before this by `allowed`, which reports it as a verdict.
             // Reaching here would mean the two disagreed about the same rule.
-            problem::Chosen::NotAllowed { wanted, allowed } => {
+            Chosen::NotAllowed { wanted, allowed } => {
                 anyhow::bail!("{wanted} is not accepted here; the activity allows {allowed:?}")
             }
-            problem::Chosen::NotSubmittable(why) => anyhow::bail!(why),
+            Chosen::NotSubmittable(why) => anyhow::bail!(why),
         };
 
-        let pid = match self.numbers.get(&setup.number) {
-            Some(pid) => *pid,
-            None => {
-                let found = self.uhunt.problem(setup.number).await?;
-                if found.status == 0 {
-                    anyhow::bail!(
-                        "onlinejudge.org lists problem {} as unavailable, so it cannot be judged",
-                        setup.number
-                    );
-                }
-                self.numbers.insert(setup.number, found.pid);
-                found.pid
-            }
-        };
+        let pid = self.judge.problem(setup.number).await?;
 
         let submitted = job
             .files
@@ -301,18 +300,22 @@ impl Runner {
             .await?;
         let source = std::fs::read_to_string(held.path())?;
 
+        let name = self.judge.name();
         let sid = self
-            .site
+            .judge
             .submit(
                 setup.number,
                 language,
                 &source,
-                Duration::from_secs(self.config.submit_min_interval),
+                Duration::from_secs(self.config.external.submit_min_interval),
             )
             .await
+            // **The judge is named here rather than by the error type.** One
+            // wording for every integration would drop the only word an
+            // operator reading a failed submission needs.
             .map_err(|refused| match refused {
-                Refused::SessionLapsed => anyhow::anyhow!("{}", Refused::SessionLapsed),
-                Refused::Site(why) => anyhow::anyhow!("{}", Refused::Site(why)),
+                Refused::SessionLapsed => anyhow::anyhow!("the {name} session had lapsed"),
+                Refused::Site(why) => anyhow::anyhow!("{name} refused the submission: {why}"),
             })?;
 
         Ok((
@@ -334,83 +337,55 @@ impl Runner {
         ))
     }
 
-    /// The account's numeric id, resolved the first time it is wanted.
-    async fn account(&mut self) -> Option<u64> {
-        if let Some(uid) = self.uid {
-            return Some(uid);
-        }
-        match self.uhunt.user_id(&self.config.uva_username).await {
-            Ok(uid) => {
-                tracing::info!(uid, "resolved the archive account");
-                self.uid = Some(uid);
-                Some(uid)
-            }
-            // Not reaching uHunt says nothing about anybody's solution, and the
-            // next cycle asks again.
-            Err(e) => {
-                tracing::warn!(%e, "could not resolve the archive account");
-                None
-            }
-        }
-    }
-
     /// One request, however many submissions are outstanding.
     async fn harvest(&mut self) {
-        let Some(after) = uhunt::cursor(self.pending.sids()) else {
+        let outstanding: Vec<i64> = self.pending.sids().collect();
+        if outstanding.is_empty() {
             return;
-        };
-        let Some(uid) = self.account().await else {
-            return;
-        };
-        let rows = match self.uhunt.since(uid, after).await {
-            Ok(rows) => rows,
-            // Not reaching the archive says nothing about anybody's solution.
+        }
+        let answers = match self.judge.answers(&outstanding).await {
+            Ok(answers) => answers,
+            // Not reaching the judge says nothing about anybody's solution.
             Err(e) => {
-                tracing::warn!(%e, "could not read the archive");
+                tracing::warn!(%e, judge = self.judge.name(), "could not read the judge");
                 return;
             }
         };
 
         let mut done: Vec<(i64, Option<serde_json::Value>, ReportResult)> = Vec::new();
-        for row in &rows {
-            let entry = match self.pending.matched(row) {
+        for answer in &answers {
+            let id = self.judge.id_of(answer);
+            let entry = match self.pending.matched(id, self.judge.problem_of(answer)) {
                 Matched::Stranger => continue,
                 Matched::Disagrees { expected, found } => {
                     tracing::error!(
-                        sid = row.sid,
+                        sid = id,
                         expected,
                         found,
-                        "a submission row names a different problem than the one we sent; \
-                         not treating it as an answer"
+                        "an answer names a different problem than the one we sent; \
+                        not treating it as an answer"
                     );
                     continue;
                 }
                 Matched::Ours(entry) => entry.clone(),
             };
 
-            if let Some(held) = self.pending.get_mut(row.sid) {
-                held.trail.push(format!(
-                    "row: [{},{},{},{},{},{}]",
-                    row.sid,
-                    row.pid,
-                    row.verdict_id,
-                    row.runtime_ms,
-                    row.submitted_at,
-                    row.language_id
-                ));
+            if let Some(held) = self.pending.get_mut(id) {
+                held.trail.push(self.judge.evidence(answer));
             }
 
-            match verdict::of(row.verdict_id) {
+            match self.judge.outcome(answer) {
                 Outcome::Pending => {}
                 Outcome::Judged {
                     verdict,
                     abbreviation,
                 } => {
-                    let solved = verdict::solved(abbreviation, &entry.accepted);
+                    let solved = crate::integration::solved(abbreviation, &entry.accepted);
                     let document =
-                        crate::report::details(&entry, row, verdict, abbreviation, solved);
+                        self.judge
+                            .details(&entry, answer, verdict, abbreviation, solved);
                     done.push((
-                        row.sid,
+                        id,
                         Some(document),
                         ReportResult::judged(
                             &entry.lease_token,
@@ -427,9 +402,9 @@ impl Runner {
                             "{reason}; this will not be retried"
                         );
                     }
-                    let document = crate::report::details_of_failure(&entry, row.sid, reason);
+                    let document = self.judge.details_of_failure(&entry, id, reason);
                     done.push((
-                        row.sid,
+                        id,
                         Some(document),
                         ReportResult::failed(&entry.lease_token, reason),
                     ));
@@ -446,18 +421,19 @@ impl Runner {
         }
     }
 
-    /// The archive did not answer in time.
+    /// The judge did not answer in time.
     async fn expire(&mut self) {
-        let timeout = Duration::from_secs(self.config.pending_timeout);
+        let timeout = Duration::from_secs(self.config.external.pending_timeout);
         for sid in self.pending.timed_out(timeout, Instant::now()) {
             let Some(entry) = self.pending.take(sid) else {
                 continue;
             };
             let why = format!(
-                "onlinejudge.org did not judge submission {sid} within {} seconds",
-                self.config.pending_timeout
+                "{} did not judge submission {sid} within {} seconds",
+                self.judge.name(),
+                self.config.external.pending_timeout
             );
-            let document = crate::report::details_of_failure(&entry, sid, &why);
+            let document = self.judge.details_of_failure(&entry, sid, &why);
             self.attach(&entry, Some(document)).await;
             self.fail(&entry.job_id, &entry.lease_token, &why).await;
         }
@@ -470,7 +446,7 @@ impl Runner {
             .iter()
             .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
             .collect();
-        let ceiling = lease::ceiling(self.config.lease_seconds, self.config.poll_max);
+        let ceiling = lease::ceiling(self.config.lease_seconds, self.config.external.poll_max);
 
         for (sid, job_id, token) in held {
             // Success is an answer like any other, so it goes through the same
@@ -516,17 +492,7 @@ impl Runner {
     async fn attach(&self, entry: &Entry, document: Option<serde_json::Value>) {
         let mut carried: Vec<(&str, &str, Vec<u8>)> = Vec::new();
         if !entry.trail.is_empty() {
-            carried.push((
-                "log",
-                "text/plain",
-                entry
-                    .trail
-                    .join(
-                        "
-",
-                    )
-                    .into_bytes(),
-            ));
+            carried.push(("log", "text/plain", entry.trail.join("\n").into_bytes()));
         }
         if let Some(document) = &document {
             match serde_json::to_vec_pretty(document) {

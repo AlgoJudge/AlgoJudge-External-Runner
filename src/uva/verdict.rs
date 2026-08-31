@@ -5,45 +5,18 @@
 //! participant being wrong. Reporting either as a wrong answer marks somebody
 //! down for our infrastructure, so they leave here as an infrastructure failure
 //! and the Server refuses to score one.
+//!
+//! The distinction itself is not UVa's — every external judge has a way of
+//! failing to decide — so `Outcome` lives in `crate::integration`. What is UVa's
+//! is the numbering below.
 
-/// What the Runner does with a submission row it recognised.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// The archive judged it. `verdict` is stored verbatim; `solved` decides the
-    /// score against the activity's list of accepted verdicts.
-    Judged {
-        /// The canonical long name, for the column filters and rankings key on.
-        verdict: &'static str,
-        /// The two-letter name a UVa user recognises, for the result screen.
-        abbreviation: &'static str,
-    },
-    /// Not judged yet. Keep waiting; this is not an answer.
-    Pending,
-    /// The judge never formed an opinion. Never a verdict, never a score.
-    Failed {
-        reason: &'static str,
-        /// Whether asking again could ever produce a different answer.
-        ///
-        /// `CannotBeJudged` is a property of the problem — the archive holds no
-        /// tests for it — so a retry is four more submissions to somebody else's
-        /// site for the same answer.
-        permanent: bool,
-    },
-}
+use crate::integration::Outcome;
 
 /// uHunt's verdict id, as it appears at index 2 of a submission row.
 ///
 /// Read from <https://onlinejudge.org/index.php?option=com_content&task=view&id=16>
 /// on 2026-08-13. Anything not listed is treated as not-yet-judged rather than
 /// guessed at: a number we do not know is not evidence that a person was wrong.
-/// What a submission the activity's rules refuse is called.
-///
-/// **The same word `standard-io@1` uses**, and that is the point: a participant
-/// who chose a language the manager excluded should read the same verdict
-/// whichever Runner would have judged it. The archive never sees this
-/// submission — nothing is sent — so there is no external verdict to report.
-pub const POLICY_VIOLATION: &str = "PolicyViolation";
-
 pub fn of(id: i64) -> Outcome {
     match id {
         90 => judged("Accepted", "AC"),
@@ -72,25 +45,15 @@ pub fn of(id: i64) -> Outcome {
     }
 }
 
+/// The verdict id a compilation failure carries, which is the one thing the
+/// result document's `compilation` member is derived from.
+pub const COMPILATION_ERROR: i64 = 30;
+
 const fn judged(verdict: &'static str, abbreviation: &'static str) -> Outcome {
     Outcome::Judged {
         verdict,
         abbreviation,
     }
-}
-
-/// Whether a judged verdict counts as solved **here**.
-///
-/// The list comes from the problem's configuration, not from this file: a
-/// contest counts only `AC`, while a course may reasonably accept a correct
-/// answer with sloppy whitespace. Expressed as a list rather than as a fraction,
-/// so the score stays binary and every number in it comes from a rule somebody
-/// wrote down rather than from a judgement we invented about somebody else's
-/// verdict.
-pub fn solved(abbreviation: &str, accepted: &[String]) -> bool {
-    accepted
-        .iter()
-        .any(|a| a.eq_ignore_ascii_case(abbreviation))
 }
 
 #[cfg(test)]
@@ -161,15 +124,16 @@ mod tests {
         assert_eq!(of(-1), Outcome::Pending);
     }
 
+    /// The one id the result document reads directly rather than through
+    /// `of`, so it is pinned to the verdict it is supposed to mean.
     #[test]
-    fn what_counts_as_solved_is_configuration() {
-        let strict = vec!["AC".to_owned()];
-        let lenient = vec!["AC".to_owned(), "PE".to_owned()];
-
-        assert!(solved("AC", &strict));
-        assert!(!solved("PE", &strict));
-        assert!(solved("PE", &lenient));
-        // A configuration file is written by a person, so case is not a trap.
-        assert!(solved("ac", &strict));
+    fn the_compilation_error_id_is_the_one_that_maps_to_ce() {
+        assert_eq!(
+            of(COMPILATION_ERROR),
+            Outcome::Judged {
+                verdict: "CompilationError",
+                abbreviation: "CE"
+            }
+        );
     }
 }
