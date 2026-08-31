@@ -431,17 +431,19 @@ impl<J: Judge> Runner<J> {
                     ));
                 }
                 Outcome::Failed { reason, permanent } => {
+                    // The distinction goes to the Server, not only to this
+                    // Runner's stderr — see `integration::failure_reason`.
+                    let why = crate::integration::failure_reason(reason, permanent);
                     if permanent {
-                        tracing::error!(
-                            problem = entry.problem_number,
-                            "{reason}; this will not be retried"
-                        );
+                        tracing::error!(problem = entry.problem_number, "{why}");
+                    } else {
+                        tracing::warn!(problem = entry.problem_number, "{why}");
                     }
-                    let document = self.judge.details_of_failure(&entry, id, reason);
+                    let document = self.judge.details_of_failure(&entry, id, &why);
                     done.push((
                         id,
                         Some(document),
-                        ReportResult::failed(&entry.lease_token, reason),
+                        ReportResult::failed(&entry.lease_token, &why),
                     ));
                 }
             }

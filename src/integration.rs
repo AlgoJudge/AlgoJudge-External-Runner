@@ -120,6 +120,33 @@ impl std::fmt::Display for Refused {
     }
 }
 
+/// What the Server stores for a submission the judge never formed an opinion on.
+///
+/// **`permanent` had one reader, and it was a log level.** `Outcome::Failed`
+/// carries whether asking again could ever produce a different answer;
+/// `harvest` printed that at `error!` on this Runner's own stderr — and nothing
+/// at all for the other case — then sent the Server a reason that read
+/// identically either way. The person deciding whether to rejudge is looking at
+/// the Server, and this Runner's stderr from three hours ago is not in front of
+/// them. So the distinction travels in the sentence.
+///
+/// **A sentence and not a field**, deliberately: `ReportResult` has no member
+/// for it, and inventing a wire flag for one Runner's judgement about somebody
+/// else's archive would be a Server change made for a problem type — which is
+/// the one thing this product's architecture refuses. `FailureReason` is an
+/// unbounded text column, so the room is there.
+///
+/// The stakes are stated where the values are: `verdict.rs` says a can't-be-judged
+/// problem asked again is *"four more submissions to somebody else's site for
+/// the same answer"*, four being the Server's own delivery cap.
+pub fn failure_reason(reason: &str, permanent: bool) -> String {
+    if permanent {
+        format!("{reason}. Asking again would produce the same answer, so a rejudge will not help")
+    } else {
+        format!("{reason}. Asking again could produce a different answer; a rejudge may help")
+    }
+}
+
 /// What a submission the activity's rules refuse is called.
 ///
 /// **The same word `standard-io@1` uses**, and that is the point: a participant
@@ -332,6 +359,24 @@ pub trait Judge: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The distinction goes where the person deciding a rejudge is looking.**
+    ///
+    /// `permanent` used to pick a log level on this Runner's own stderr and
+    /// nothing else — the Server was sent a reason that read identically either
+    /// way, and the Server is what a manager has in front of them three hours
+    /// later.
+    #[test]
+    fn a_failure_says_whether_asking_again_could_help() {
+        let settled = failure_reason("the archive has no tests for this problem", true);
+        let worth_retrying = failure_reason("the archive refused the submission", false);
+
+        assert!(settled.contains("will not help"), "{settled}");
+        assert!(worth_retrying.contains("may help"), "{worth_retrying}");
+        assert_ne!(settled, worth_retrying);
+        // The judge's own words survive in both.
+        assert!(settled.starts_with("the archive has no tests"), "{settled}");
+    }
 
     fn document(text: &str) -> Option<serde_json::Value> {
         Some(serde_json::from_str(text).unwrap())
