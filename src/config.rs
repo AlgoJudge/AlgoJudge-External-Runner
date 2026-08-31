@@ -173,7 +173,11 @@ impl Config {
                 username: var("External__Username").context(
                     "AJ_External__Username is required: the account submissions are made under",
                 )?,
-                password: var("External__Password").context("AJ_External__Password is required")?,
+                // Untrimmed: see `secret`. The username stays trimmed — it is an
+                // identifier rather than a secret, and it becomes a path segment
+                // in a uHunt request.
+                password: secret("External__Password")
+                    .context("AJ_External__Password is required")?,
                 user_id: match var("External__UserId") {
                     Ok(value) => Some(number_in(&value, "External__UserId")?),
                     Err(_) => None,
@@ -289,6 +293,26 @@ fn var(key: &str) -> Result<String, std::env::VarError> {
     }
 }
 
+/// A value read **exactly as it was given**.
+///
+/// **The trim in `var` is right for a URL and wrong for a credential.** A
+/// password with a leading or trailing space is legal on somebody else's site
+/// and easy to acquire by pasting one into a `.env`; trimming it sent a
+/// different password, the sign-in failed, and until 2026-08-31 that was
+/// reported as a lapsed session with two submissions attempted per job and
+/// nothing in any log naming the configuration.
+///
+/// Still absent when it is only whitespace: a password of three spaces is a
+/// field somebody left blank, and *required* is a more useful answer than a
+/// refusal from the archive.
+fn secret(key: &str) -> Result<String, std::env::VarError> {
+    match std::env::var(format!("AJ_{key}")) {
+        Ok(value) if value.trim().is_empty() => Err(std::env::VarError::NotPresent),
+        Ok(value) => Ok(value),
+        Err(e) => Err(e),
+    }
+}
+
 fn list(key: &str, fallback: &str) -> Vec<String> {
     var(key)
         .unwrap_or_else(|_| fallback.to_owned())
@@ -397,6 +421,28 @@ mod tests {
         assert_eq!(tags("Runner__Tags"), vec!["lab-a", "lab-b"]);
 
         std::env::remove_var("AJ_Runner__Tags");
+    }
+
+    /// **A credential is not a URL, and one reader trimmed both.**
+    ///
+    /// A password ending in a space is legal on somebody else's site and is what
+    /// pasting into a `.env` produces. Trimming it sent a different password and
+    /// the failure surfaced three layers away, as a lapsed session with two
+    /// submissions attempted per job.
+    #[test]
+    fn a_password_is_not_trimmed_and_a_url_is() {
+        std::env::set_var("AJ_External__Password", " hunter2 ");
+        std::env::set_var("AJ_Server__BaseUrl", "  http://server:8080/api/v1  ");
+
+        assert_eq!(secret("External__Password").unwrap(), " hunter2 ");
+        assert_eq!(var("Server__BaseUrl").unwrap(), "http://server:8080/api/v1");
+
+        // Whitespace alone is a field somebody left blank, on either reader.
+        std::env::set_var("AJ_External__Password", "   ");
+        assert!(secret("External__Password").is_err());
+
+        std::env::remove_var("AJ_External__Password");
+        std::env::remove_var("AJ_Server__BaseUrl");
     }
 
     #[test]
