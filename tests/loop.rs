@@ -204,6 +204,7 @@ fn probe_config(
             .join(format!("loop-probe-cache-{who}-{}", std::process::id()))
             .to_string_lossy()
             .into_owned(),
+        cache_max_bytes: 64 * 1024 * 1024,
         // Sixty against sixty makes `lease::ceiling` zero, so one failed renewal
         // is already too many. `refuse_what_cannot_work` would refuse this, and
         // is deliberately not called: the point is to reach a decision that
@@ -256,7 +257,7 @@ async fn run_for(config: algojudge_external_runner::config::Config, how_long: Du
     let server = aj_protocol::Server::new(&config.server_base_url).expect("a Server");
     let cache = Arc::new(aj_protocol::Cache::new(
         std::path::PathBuf::from(&config.cache_path),
-        64 * 1024 * 1024,
+        config.cache_max_bytes,
     ));
     let judge = judge(&config);
     let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);

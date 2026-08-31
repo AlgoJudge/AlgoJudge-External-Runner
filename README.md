@@ -78,8 +78,8 @@ cgroups and no scratch directory.
 Two directories, and the difference between them matters. The identity key is in
 `/var/lib/algojudge-external-runner` and is meant to be a volume: losing it costs
 a re-registration and an administrator's approval. A submission's source is
-cached in `/var/cache/algojudge-external-runner` (`AJ_Cache__Path`), and losing
-that costs one download. **There is no *package* cache** — an external problem
+cached in `/var/cache/algojudge-external-runner` (`AJ_Cache__Path`, bounded by
+`AJ_Cache__MaxBytes`), and losing that costs one download. **There is no *package* cache** — an external problem
 has none, because its whole configuration travels on the job — which is not the
 same as there being no cache, and this said the second thing until 2026-08-31.
 
