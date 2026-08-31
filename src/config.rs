@@ -34,6 +34,18 @@ pub const POLL_FLOOR_SECONDS: u64 = 20;
 /// arm in `main`, not a fork.
 pub const DEFAULT_JUDGE: &str = "uva";
 
+/// Where the source cache lives when nothing says otherwise.
+///
+/// **`AJ_Cache__Path` is the name the sandboxing Runner already reads**, so an
+/// operator writing one Compose file for both does not have to remember which
+/// of the two spells it which way.
+///
+/// It was hard-coded in `main` until 2026-08-31, which is half of why the image
+/// shipped without the directory: nothing in the repository could name the path,
+/// so `.env.example` could not list it and the `Dockerfile` had to agree with a
+/// constant it could not see.
+pub const DEFAULT_CACHE_PATH: &str = "/var/cache/algojudge-external-runner";
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub server_base_url: String,
@@ -60,6 +72,16 @@ pub struct Config {
     /// examination's pool.
     pub tags: Vec<String>,
     pub key_path: String,
+
+    /// Where a submission's source is cached on its way to the judge.
+    ///
+    /// **There is no package cache and there is a source cache**, and conflating
+    /// the two cost every job in the shipped image until 2026-08-31. An external
+    /// problem has no package — its whole configuration travels on the job — so
+    /// nothing is ever downloaded for a *problem*. The participant's own file
+    /// still is, through the protocol crate's cache, with its checksum verified
+    /// before it is read.
+    pub cache_path: String,
 
     /// Requested at claim time and renewed while a submission is pending.
     ///
@@ -126,6 +148,7 @@ impl Config {
             tags: tags("Runner__Tags"),
             key_path: var("Runner__KeyPath")
                 .unwrap_or_else(|_| "/var/lib/algojudge-external-runner/identity.key".into()),
+            cache_path: var("Cache__Path").unwrap_or_else(|_| DEFAULT_CACHE_PATH.into()),
             lease_seconds: number("Lease__RequestSeconds", 1200)? as u32,
 
             external: External {
@@ -299,6 +322,7 @@ mod tests {
             problem_types: vec![],
             tags: vec![],
             key_path: "/tmp/identity.key".into(),
+            cache_path: "/tmp/cache".into(),
             lease_seconds: 1200,
             external: External {
                 judge: DEFAULT_JUDGE.into(),

@@ -74,6 +74,29 @@ jobs:
       - name: Build
         run: docker build -t algojudge-external-runner:ci .
 
+      # **The directory the source cache lives in, and who owns it.**
+      #
+      # It was absent from the image from the first build until 2026-08-31, and
+      # nothing in this gate could see it. The step below proves only that the
+      # binary refuses to start unconfigured, which it does before touching any
+      # directory; the cache is not written until a job has been claimed, so a
+      # missing one failed later and looked like something else — every claimed
+      # job reported as an infrastructure failure, with the archive never
+      # contacted.
+      #
+      # Read off the exported filesystem rather than by running anything:
+      # `distroless/static` has no shell to ask, which is the whole point of it.
+      - name: The cache directory is in the image and belongs to the Runner
+        run: |
+          docker create --name probe algojudge-external-runner:ci >/dev/null
+          owner=$(docker export probe | tar -tvf - \
+            | awk '$NF == "var/cache/algojudge-external-runner/" { print $2 }')
+          docker rm probe >/dev/null
+          test -n "$owner" || { echo "the cache directory is not in the image" >&2; exit 1; }
+          test "$owner" = "65532/65532" \
+            || { echo "the cache directory belongs to $owner, not to nonroot" >&2; exit 1; }
+          echo "owned by $owner"
+
       # It should refuse, by name, and that is the whole assertion: an image that
       # started with no configuration would be an image that had defaulted the
       # address of the Server it talks to.

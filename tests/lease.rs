@@ -227,8 +227,10 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
     approving.abort();
     let _ = approving.await;
 
+    // From the configuration, like the binary does, rather than beside it: two
+    // places naming one directory is how the image came to ship without it.
     let cache = Arc::new(aj_protocol::Cache::new(
-        std::env::temp_dir().join("lease-probe-cache"),
+        std::path::PathBuf::from(&config.cache_path),
         64 * 1024 * 1024,
     ));
     let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
@@ -345,6 +347,10 @@ fn probe_config(site: &str, hunt: &str) -> algojudge_external_runner::config::Co
         tags: vec![],
         key_path: std::env::temp_dir()
             .join(format!("lease-probe-{}.key", std::process::id()))
+            .to_string_lossy()
+            .into_owned(),
+        cache_path: std::env::temp_dir()
+            .join("lease-probe-cache")
             .to_string_lossy()
             .into_owned(),
         lease_seconds: 80,

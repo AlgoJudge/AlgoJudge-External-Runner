@@ -62,8 +62,13 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
     // The cache is the protocol crate's, used only to fetch a submission's
     // source with its checksum verified. No package is ever downloaded: an
     // external problem has none, and its whole configuration travels on the job.
+    //
+    // **The path is configuration, and was a literal here until 2026-08-31.**
+    // Nothing else in the repository could name it, so the image was built to a
+    // path it could not see and shipped without the directory — see
+    // `config::DEFAULT_CACHE_PATH`.
     let cache = std::sync::Arc::new(aj_protocol::Cache::new(
-        std::path::PathBuf::from("/var/cache/algojudge-external-runner"),
+        std::path::PathBuf::from(&config.cache_path),
         256 * 1024 * 1024,
     ));
 
