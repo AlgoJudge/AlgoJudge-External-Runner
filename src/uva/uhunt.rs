@@ -101,6 +101,50 @@ pub struct Uhunt {
     base: String,
 }
 
+/// What uHunt's answer to `uname2uid` means.
+///
+/// Its own function so the rule can be tested without a request: the archive is
+/// never a test dependency here, and this is a rule about a body rather than
+/// about a protocol.
+fn account_id(body: &str, username: &str) -> anyhow::Result<u64> {
+    let uid: u64 = body
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("uHunt answered {body:?} for the account {username:?}"))?;
+    if uid == 0 {
+        anyhow::bail!(
+            "uHunt does not know the account {username:?} — it answers 0 for a name it \
+             has never seen, which is not an id to poll with"
+        );
+    }
+    Ok(uid)
+}
+
+/// One path segment, and not a path.
+///
+/// **An operator's typo should not change the shape of a request.** The
+/// username is configuration rather than anything a participant sends, so this
+/// is a small hazard — but it is interpolated straight into a URL, and a name
+/// carrying a slash or a question mark asked uHunt something other than what
+/// this function is named for.
+fn segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+                c.to_string()
+            } else {
+                let mut encoded = String::new();
+                let mut buffer = [0u8; 4];
+                for byte in c.encode_utf8(&mut buffer).as_bytes() {
+                    encoded.push_str(&format!("%{byte:02X}"));
+                }
+                encoded
+            }
+        })
+        .collect()
+}
+
 impl Uhunt {
     pub fn new(http: reqwest::Client, base: String) -> Self {
         Self { http, base }
@@ -121,11 +165,19 @@ impl Uhunt {
     }
 
     /// The account's numeric id, resolved once at start-up.
+    ///
+    /// **Zero is uHunt's word for "no such account", and it parses.** The error
+    /// below could never fire for the case it names: a typo in
+    /// `AJ_External__Username` resolved to uid 0, was cached, and every poll
+    /// then asked `subs-user/0/…`, which answers no rows. Nothing ever matched,
+    /// nothing was reported, and every submission aged out at
+    /// `pending_timeout` as an infrastructure failure — while the solutions sat
+    /// judged on the real account.
     pub async fn user_id(&self, username: &str) -> anyhow::Result<u64> {
-        let body = self.text(&format!("uname2uid/{username}")).await?;
-        body.trim()
-            .parse()
-            .map_err(|_| anyhow::anyhow!("uHunt does not know the account {username:?}"))
+        let body = self
+            .text(&format!("uname2uid/{}", segment(username)))
+            .await?;
+        account_id(&body, username)
     }
 
     /// One problem by its public number — the number a person types.
@@ -149,6 +201,35 @@ impl Uhunt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **uHunt answers `0` for a name it has never seen, and `0` parses.**
+    ///
+    /// So the "does not know the account" error could never fire for the case
+    /// it was written for. A typo in `AJ_External__Username` became uid 0, was
+    /// cached, and every poll asked `subs-user/0/…` — which answers no rows, so
+    /// nothing matched and every submission aged out as an infrastructure
+    /// failure while sitting judged on the real account.
+    #[test]
+    fn a_username_uhunt_does_not_know_is_not_account_zero() {
+        let refused = account_id("0", "robto").unwrap_err().to_string();
+        assert!(refused.contains("robto"), "{refused}");
+        assert!(refused.contains("does not know"), "{refused}");
+
+        // The error it could always fire for still does.
+        assert!(account_id("<html>down</html>", "robot").is_err());
+        // And a real id is still a real id.
+        assert_eq!(account_id(" 12345\n", "robot").unwrap(), 12345);
+    }
+
+    /// A name is one segment of a path, whatever an operator typed into it.
+    #[test]
+    fn a_username_is_a_path_segment_and_not_a_path() {
+        assert_eq!(segment("robot"), "robot");
+        assert_eq!(segment("a.b-c_d~e"), "a.b-c_d~e");
+        assert_eq!(segment("robot/../p/num/100"), "robot%2F..%2Fp%2Fnum%2F100");
+        assert_eq!(segment("two words"), "two%20words");
+        assert_eq!(segment("q?x=1"), "q%3Fx%3D1");
+    }
 
     /// Captured from `GET /api/subs-user-last/{uid}/3` on 2026-08-13.
     const SUBS: &str = r#"{"name":"A Robot","uname":"robot","subs":[
