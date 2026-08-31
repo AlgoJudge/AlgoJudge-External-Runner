@@ -28,6 +28,15 @@ use anyhow::{bail, Context};
 /// all — onlinejudge.org does not (searched 2026-08-13, nothing found).
 pub const POLL_FLOOR_SECONDS: u64 = 20;
 
+/// The longest lease the Server will grant, whatever is asked for.
+///
+/// **Not this Runner's choice.** `RunnerService` clamps `leaseSeconds` to
+/// `[60, 3600]` on both the claim and the renewal, and `aj-protocol` says so at
+/// `ClaimedJob::lease_expires_at`: *the granted deadline is authoritative, and a
+/// Runner that renews on its own arithmetic renews on a number the Server never
+/// agreed to*. Read off `AlgoJudge-Server` on 2026-08-31.
+pub const SERVER_LEASE_CEILING_SECONDS: u32 = 3600;
+
 /// The judge served when nothing says otherwise.
 ///
 /// **The only one there is.** A second is a module beside `crate::uva` and an
@@ -184,12 +193,15 @@ impl Config {
         Ok(config)
     }
 
-    /// The three ways a configuration can be accepted and still be wrong.
+    /// Every way a configuration can be accepted and still be wrong.
     ///
     /// Checked at start-up rather than discovered in an hour: each of these
     /// fails somewhere far from its cause — a lease shorter than the timeout
     /// looks like the judge double-judging, and a poll floor below twenty
     /// looks like nothing at all until somebody else's server complains.
+    ///
+    /// **This said "the three ways" while there were five**, which is the shape
+    /// a count in prose always ends up in. There is no number here now.
     fn refuse_what_cannot_work(&self) -> anyhow::Result<()> {
         if self.external.poll_min < POLL_FLOOR_SECONDS {
             bail!(
@@ -203,6 +215,28 @@ impl Config {
                 "AJ_External__PollMaxSeconds is {}, below AJ_External__PollMinSeconds of {}",
                 self.external.poll_max,
                 self.external.poll_min
+            );
+        }
+        // **Before the two checks that compute with the lease**, because if the
+        // Server is going to clamp it then every number they reason about is
+        // one it never agreed to — and the message on the second of them says
+        // so out loud ("the Server clamps it at 3600, so this cannot exceed
+        // 900") while nothing enforced the antecedent. `tests/lease.rs` has
+        // carried the hole in prose since 2026-08-23: 3700 against a pending
+        // timeout of 3650 passes every other check, the Server grants 3600, and
+        // the job is held fifty seconds past the lease it really has.
+        //
+        // **No floor to match it**, and that is deliberate: the clamp's lower
+        // half grants *more* than was asked, so a lease that is too small is
+        // refused below on its own merits and never by being raised.
+        if self.lease_seconds > SERVER_LEASE_CEILING_SECONDS {
+            bail!(
+                "AJ_Lease__RequestSeconds is {}, above the {SERVER_LEASE_CEILING_SECONDS} \
+                 seconds the Server will grant. It clamps what it hands out, so this Runner \
+                 would renew against a deadline of its own invention and hold a job past the \
+                 lease it really has — and the next Runner to claim it would submit the same \
+                 solution again.",
+                self.lease_seconds
             );
         }
         if u64::from(self.lease_seconds) <= self.external.pending_timeout {
@@ -372,6 +406,33 @@ mod tests {
         let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
         assert!(refused.contains("PollMinSeconds"), "{refused}");
         assert!(refused.contains("not lowered"), "{refused}");
+    }
+
+    /// **The rule the message beside it already stated and nothing enforced.**
+    ///
+    /// `tests/lease.rs` has described this hole in prose since 2026-08-23 — a
+    /// lease of 3700 against a pending timeout of 3650 clears every other check,
+    /// the Server grants 3600, and the job is then held fifty seconds past the
+    /// lease it really has. The knowledge lived in a test's doc comment and the
+    /// guard lived nowhere.
+    #[test]
+    fn a_lease_above_the_servers_ceiling_is_refused() {
+        let mut config = base();
+        config.lease_seconds = 7200;
+        config.external.pending_timeout = 3650;
+        let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
+        assert!(refused.contains("RequestSeconds"), "{refused}");
+        assert!(refused.contains("3600"), "{refused}");
+
+        // The ceiling itself is a setting, not the first refusal — and the
+        // parenthetical in the message below it becomes true: nine hundred is
+        // exactly what a poll interval may be once the lease is capped here.
+        config.lease_seconds = SERVER_LEASE_CEILING_SECONDS;
+        config.external.pending_timeout = 900;
+        config.external.poll_max = 900;
+        config
+            .refuse_what_cannot_work()
+            .expect("the ceiling the Server grants is a lease this Runner may ask for");
     }
 
     /// The collision §3.2 of the specification found, refused at start-up rather
