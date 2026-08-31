@@ -17,9 +17,25 @@ use aj_protocol::wire::{AttachToJob, ClaimedJob, Register, ReportResult};
 use aj_protocol::{Backoff, Cache, Identity, Server};
 
 use crate::config::Config;
-use crate::integration::{Chosen, Judge, Outcome, Refused};
+use crate::integration::{Chosen, Judge, Outcome, Refused, Setup};
 use crate::lease::{self, Action, Standing};
 use crate::pending::{Entry, Matched, Pending};
+
+/// Why a claimed job never reaches the judge, and **whose fault that is**.
+///
+/// The distinction used to live in two places and they disagreed: one reader
+/// decided whether a refusal was a verdict, another decided what to submit, and
+/// the second one's answer for the same condition was an infrastructure failure.
+/// One reader cannot disagree with itself.
+enum Blocked {
+    /// The activity's own rules refuse it. **A verdict, not a failure**: the
+    /// participant chose it, their code may be perfect, and what they broke is a
+    /// rule of the activity — the same answer `standard-io@1` gives.
+    Verdict(String),
+    /// The platform cannot forward it. An infrastructure failure, and the
+    /// submission stays rejudgeable.
+    Failure(String),
+}
 
 /// What the Server records this Runner as being.
 ///
@@ -212,17 +228,25 @@ impl<J: Judge> Runner<J> {
         // is a rule of the activity. Two problem types answering this
         // differently would make the verdict a property of who judged rather
         // than of what happened.
-        if let Err(refusal) = self.allowed(&job) {
-            tracing::info!(job = %job.job_id, %refusal, "refused by the activity's rules");
-            self.send(
-                &job.job_id,
-                &ReportResult::judged(&token, 0.0, 1.0, crate::integration::POLICY_VIOLATION),
-            )
-            .await;
-            return;
-        }
+        let (setup, language) = match self.prepare(&job) {
+            Ok(prepared) => prepared,
+            Err(Blocked::Verdict(refusal)) => {
+                tracing::info!(job = %job.job_id, %refusal, "refused by the activity's rules");
+                self.send(
+                    &job.job_id,
+                    &ReportResult::judged(&token, 0.0, 1.0, crate::integration::POLICY_VIOLATION),
+                )
+                .await;
+                return;
+            }
+            Err(Blocked::Failure(why)) => {
+                tracing::warn!(job = %job.job_id, %why, "not forwarded");
+                self.fail(&job.job_id, &token, &why).await;
+                return;
+            }
+        };
 
-        match self.forward(&job).await {
+        match self.forward(&job, setup, language).await {
             Ok(entry) => {
                 if let Err(e) = self.server.progress(&job.job_id, &token).await {
                     tracing::warn!(%e, "could not say the work had started");
@@ -242,50 +266,55 @@ impl<J: Judge> Runner<J> {
         }
     }
 
-    /// Whether this submission may be sent at all.
+    /// Everything a job has to say before anything leaves the installation.
     ///
-    /// Read from the same two documents `forward` reads, and deliberately
-    /// before it: a refusal here leaves nothing on somebody else's judge.
-    fn allowed(&self, job: &ClaimedJob) -> Result<(), String> {
-        // Not this check's business. `forward` reports an unreadable
-        // configuration as the infrastructure failure it is, with the message
-        // that names the missing field.
-        let Ok(setup) = self
-            .judge
-            .read(job.problem_version_props.as_ref(), job.config.as_ref())
-        else {
-            return Ok(());
-        };
-
-        match self.judge.language(&setup, language_of(job.props.as_ref())) {
-            Chosen::NotAllowed { wanted, allowed } => Err(format!(
-                "this problem does not accept {wanted} here; it accepts {allowed:?}"
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    async fn forward(&mut self, job: &ClaimedJob) -> anyhow::Result<(i64, Entry)> {
+    /// **One reader, because two disagreed about the same rule.** `allowed`
+    /// read the two documents and answered the language question to decide
+    /// whether a refusal was a verdict; `forward` read the same two documents
+    /// and asked the same question again to decide what to submit — four
+    /// `serde_json::from_value` over cloned documents per job. `forward`'s own
+    /// `NotAllowed` arm carried the comment *"reaching here would mean the two
+    /// disagreed about the same rule"*, and it was unreachable by construction
+    /// while turning that state into an infrastructure failure — the opposite
+    /// of the answer the identical condition earned twenty lines earlier.
+    ///
+    /// Two constraints the collapse had to preserve, and does. An unreadable
+    /// configuration is reported **once**, with the message that names the
+    /// missing field — `allowed` swallowed that error precisely because
+    /// `forward` owned the message. And `NotSubmittable` stays a `Failure`: the
+    /// participant chose from a list the platform gave them, so it is the
+    /// platform's fault and the submission stays rejudgeable.
+    ///
+    /// `props.language`, since 2026-08-22. The Server carries the document
+    /// without reading a member of it, so which member names the language is
+    /// the problem type's to know — and an external type calls it the same
+    /// thing `standard-io@1` does.
+    fn prepare(&self, job: &ClaimedJob) -> Result<(Setup, i64), Blocked> {
         // Two documents, two questions: the version says which problem, the
         // assignment says how this course counts it.
         let setup = self
             .judge
-            .read(job.problem_version_props.as_ref(), job.config.as_ref())?;
+            .read(job.problem_version_props.as_ref(), job.config.as_ref())
+            .map_err(|e| Blocked::Failure(e.to_string()))?;
 
-        // `props.language`, since 2026-08-22. The Server carries the document
-        // without reading a member of it, so which member names the language is
-        // the problem type's to know — and an external type calls it the same
-        // thing `standard-io@1` does.
         let language = match self.judge.language(&setup, language_of(job.props.as_ref())) {
             Chosen::Accepted(number) => number,
-            // Refused before this by `allowed`, which reports it as a verdict.
-            // Reaching here would mean the two disagreed about the same rule.
             Chosen::NotAllowed { wanted, allowed } => {
-                anyhow::bail!("{wanted} is not accepted here; the activity allows {allowed:?}")
+                return Err(Blocked::Verdict(format!(
+                    "this problem does not accept {wanted} here; it accepts {allowed:?}"
+                )))
             }
-            Chosen::NotSubmittable(why) => anyhow::bail!(why),
+            Chosen::NotSubmittable(why) => return Err(Blocked::Failure(why)),
         };
+        Ok((setup, language))
+    }
 
+    async fn forward(
+        &mut self,
+        job: &ClaimedJob,
+        setup: Setup,
+        language: i64,
+    ) -> anyhow::Result<(i64, Entry)> {
         let pid = self.judge.problem(setup.number).await?;
 
         let submitted = job
