@@ -119,6 +119,22 @@ the image neither should nor — running as `nonroot` — can write. The compose
 states `AJ_Runner__KeyPath` in `environment:`, which takes precedence, and that
 is what lets one `.env` serve both.
 
+## The published image
+
+Pushing a `v*` tag publishes one image to GitHub's container registry:
+
+```bash
+docker pull ghcr.io/algojudge/algojudge-external-runner:0.1.0
+```
+
+`0.1.0`, `0.1`, `0` and `latest` point at the same image; **a prerelease
+(`v0.1.0-rc.1`) publishes only its own tag**, so nothing moving ever points at a
+release candidate. `linux/amd64` only.
+
+**No language images**, unlike the sandboxing Runner: this one compiles nothing
+and runs nothing, so there is one image here and five there.
+[docs/RELEASE.md](docs/RELEASE.md) is what to do before pushing that tag.
+
 ## Configuration
 
 Every variable is `AJ_`-prefixed, the same convention the Server reads.

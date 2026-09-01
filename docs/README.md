@@ -11,3 +11,9 @@ this one.
 | | |
 |---|---|
 | [UVA.md](UVA.md) | **UVa Online Judge**, serving `uva@1` against `onlinejudge.org`. The only integration there is |
+
+One file here is not an integration:
+
+| | |
+|---|---|
+| [RELEASE.md](RELEASE.md) | what to do before pushing a `v*` tag, and where the version is written |
