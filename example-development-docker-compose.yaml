@@ -19,10 +19,11 @@
 # checkout, so it needs
 # `AlgoJudge-Server` beside this repository.
 #
-# **Not the production stack.** That belongs in `AlgoJudge-Ops`, which does not
-# carry this image yet. Port 8098 rather than 8080 so this can stand beside the
-# Server's own development stack and AlgoJudge-Runner's without either taking the
-# other's port; it is the port this repository's tests and README already name.
+# **Not the production stack.** That belongs in `AlgoJudge-Ops`, where this
+# Runner is a profile of its own. Port 8098 rather than 8080 so this can stand
+# beside the Server's own development stack and AlgoJudge-Runner's without either
+# taking the other's port; it is the port this repository's tests and README
+# already name.
 #
 # **Two things this file cannot do for you**, and both stop the queue dead:
 #
