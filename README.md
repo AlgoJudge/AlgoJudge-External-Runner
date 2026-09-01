@@ -12,6 +12,20 @@ runs no code, has no sandbox, and measures nothing.
 and the judgement belong to the judging system, not to the installation that
 shows the result.
 
+## Documentation
+
+**[docs.algojudge.pl](https://docs.algojudge.pl/en/runner/external/)** is written
+for somebody who does not have this source open. This README is the other half:
+what the repository is, and how to build, run and change it.
+
+| | |
+|---|---|
+| [`/en/runner/external/`](https://docs.algojudge.pl/en/runner/external/) | what forwarding a submission means, and what a verdict from somebody else's archive is worth |
+| [`/en/install/external-runner/`](https://docs.algojudge.pl/en/install/external-runner/) | the administrator's half: the profile, the two switches that are not in `.env`, and what this Runner needs and does not |
+
+**The per-integration detail stays here**, in [docs/](docs): the calls, and what
+a problem of that archive's type carries.
+
 ## Integrations
 
 **One exists: UVa Online Judge**, serving the problem type `uva@1`. It is
@@ -228,9 +242,8 @@ steps through the integration that exists.
   frontend, which renders an external result and names the judge behind it
 - [AlgoJudge-Ops](https://github.com/AlgoJudge/AlgoJudge-Ops) — the production
   Compose stack
-- [AlgoJudge-Docs](https://github.com/AlgoJudge/AlgoJudge-Docs) — the public
-  documentation site, whose `/runner/` section covers routing and external
-  judging
+- [AlgoJudge-Docs](https://github.com/AlgoJudge/AlgoJudge-Docs) — the source of
+  the documentation site linked under *Documentation* above
 
 ## Contributing
 
