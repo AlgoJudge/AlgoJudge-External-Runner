@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aj_protocol::stopping::Stopping;
 use aj_protocol::wire::{AttachToJob, ClaimedJob, Register, ReportResult};
 use aj_protocol::{Backoff, Cache, Identity, Server};
 
@@ -138,12 +139,27 @@ impl<J: Judge> Runner<J> {
         }
     }
 
-    pub async fn work(&mut self, identity: &Identity) -> anyhow::Result<()> {
+    /// Runs until it is told to stop, and hands back what it was holding.
+    ///
+    /// **Every job, not one.** The sandboxing Runner holds a single submission
+    /// and gives that one back; this Runner holds a pool of up to
+    /// `AJ_External__MaxPending`, and a lease left to expire costs each of those
+    /// participants the whole of it.
+    pub async fn work(&mut self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
         let mut claiming = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
         let mut ask_judge_at = Instant::now();
         let mut beat_at = Instant::now();
 
         loop {
+            // **Checked first, so a stop is acted on before another cycle of
+            // somebody else's archive.** Asking the judge is the slowest thing
+            // this loop does, and the jobs it would ask about are the ones being
+            // given back.
+            if stopping.now() {
+                self.give_everything_back().await;
+                return Ok(());
+            }
+
             if !self.pending.is_empty() && Instant::now() >= ask_judge_at {
                 self.renew_everything().await;
                 self.harvest().await;
@@ -151,7 +167,10 @@ impl<J: Judge> Runner<J> {
                 ask_judge_at = Instant::now() + self.cycle();
             }
 
-            if self.pending.len() < self.config.external.max_pending {
+            // **And not while stopping**, which the top of the loop cannot
+            // decide on its own: asking the judge about the pending set happens
+            // in between, and it is the slowest call this Runner makes.
+            if !stopping.now() && self.pending.len() < self.config.external.max_pending {
                 match self.server.claim(Some(self.config.lease_seconds)).await {
                     Ok(Some(job)) => {
                         // **Asked and granted, side by side.** The Server may
@@ -188,12 +207,60 @@ impl<J: Judge> Runner<J> {
 
             // Nothing outstanding: sleep as the ordinary Runner does. Something
             // outstanding: wake in time for the judge, and no later.
+            //
+            // **Both waits are cut short by the word.** The backoff reaches
+            // thirty seconds and the judge's interval reaches five, and a Runner
+            // that sat out either of them before releasing would be holding
+            // leases for no reason at all.
             if self.pending.is_empty() {
-                claiming.wait().await;
+                tokio::select! {
+                    _ = claiming.wait() => {}
+                    _ = stopping.wait() => {}
+                }
             } else {
                 let until = ask_judge_at.saturating_duration_since(Instant::now());
-                tokio::time::sleep(until.min(Duration::from_secs(5))).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(until.min(Duration::from_secs(5))) => {}
+                    _ = stopping.wait() => {}
+                }
             }
+        }
+    }
+
+    /// Hands back everything this Runner is waiting on, because it is stopping.
+    ///
+    /// **A systemic act, not a processing error.** Nothing went wrong with any
+    /// of these submissions; the platform is taking their Runner away. So the
+    /// job returns to the queue with its delivery uncounted, rather than being
+    /// reported as an infrastructure failure that spends one of its attempts.
+    ///
+    /// **What it costs is one duplicate submission to somebody else's site**,
+    /// and that cost is not new: the pending set lives in memory, so a stop of
+    /// any kind already leaves the answer that is still coming with nowhere to
+    /// land, and the job is already re-forwarded by whoever claims it next.
+    /// What changes is when — now, rather than when the lease expires.
+    async fn give_everything_back(&mut self) {
+        let held: Vec<(i64, String, String)> = self
+            .pending
+            .iter()
+            .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
+            .collect();
+
+        for (sid, job_id, token) in held {
+            // A refusal here is not a failure to report. The one that matters
+            // says the lease is gone, which means the Server has already put the
+            // job back — the outcome this was asking for.
+            match self.server.release(&job_id, &token).await {
+                Ok(()) => tracing::info!(job = %job_id, sid, "gave the job back"),
+                Err(e) if e.lease_lost() => {
+                    tracing::info!(job = %job_id, sid, "the job was already back")
+                }
+                Err(e) => tracing::warn!(
+                    job = %job_id, sid, %e,
+                    "could not give the job back; it returns when the lease expires",
+                ),
+            }
+            self.pending.take(sid);
         }
     }
 

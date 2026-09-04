@@ -40,6 +40,16 @@ fn source_sha256() -> String {
 
 /// An archive that accepts a submission and names it.
 async fn archive(server: &MockServer) {
+    archive_naming(server, &[SID]).await;
+}
+
+/// The same, naming each submission in turn.
+///
+/// **The pending set is keyed on the archive's id**, so an archive that answered
+/// every submission with one number would leave a Runner holding one entry
+/// however many it forwarded — and a test of "every job it is holding" would be
+/// testing one.
+async fn archive_naming(server: &MockServer, sids: &[i64]) {
     Mock::given(method("GET"))
         .and(path("/"))
         .respond_with(ResponseTemplate::new(200).set_body_string(LOGIN_PAGE))
@@ -51,21 +61,28 @@ async fn archive(server: &MockServer) {
         .respond_with(ResponseTemplate::new(200).set_body_string("<html>logout</html>"))
         .mount(server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/index.php"))
-        .and(query_param("page", "save_submission"))
-        .respond_with(
-            ResponseTemplate::new(302).insert_header(
-                "location",
-                format!(
-                    "/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem\
-                 &category=&mosmsg=Submission+received+with+ID+{SID}"
-                )
-                .as_str(),
-            ),
-        )
-        .mount(server)
-        .await;
+    for (nth, sid) in sids.iter().enumerate() {
+        let mounting = Mock::given(method("POST"))
+            .and(path("/index.php"))
+            .and(query_param("page", "save_submission"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header(
+                    "location",
+                    format!(
+                        "/index.php?option=com_onlinejudge&Itemid=25&page=submit_problem\
+                 &category=&mosmsg=Submission+received+with+ID+{sid}"
+                    )
+                    .as_str(),
+                ),
+            );
+        // The last one answers for ever, so a submission this test did not plan
+        // for still gets an answer rather than a match failure.
+        if nth + 1 < sids.len() {
+            mounting.up_to_n_times(1).mount(server).await;
+        } else {
+            mounting.mount(server).await;
+        }
+    }
     // Wherever the redirect lands has to answer something.
     Mock::given(method("GET"))
         .and(path("/index.php"))
@@ -100,11 +117,23 @@ async fn uhunt(server: &MockServer, verdict: i64) {
 /// `props` and `config` are the two documents the loop reads; `problemVersionProps`
 /// is where the archive's problem number lives.
 fn job(props: &str, config: &str, version_props: &str) -> String {
+    job_named("job-1", "sub-1", "token-1", props, config, version_props)
+}
+
+/// The same, for a Server handing out more than one.
+fn job_named(
+    job_id: &str,
+    submission_id: &str,
+    lease_token: &str,
+    props: &str,
+    config: &str,
+    version_props: &str,
+) -> String {
     format!(
         // `packageFileId` is the empty string rather than absent: an external
         // problem has no package, which is the whole reason this Runner exists.
-        r#"{{"jobId":"job-1","submissionId":"sub-1","problemType":"uva@1",
-             "attempt":1,"leaseToken":"token-1","leaseExpiresAt":"2026-08-31T12:00:00Z",
+        r#"{{"jobId":"{job_id}","submissionId":"{submission_id}","problemType":"uva@1",
+             "attempt":1,"leaseToken":"{lease_token}","leaseExpiresAt":"2026-08-31T12:00:00Z",
              "problemVersionId":"version-1","packageFileId":"","packageSha256":"",
              "props":{props},"config":{config},"problemVersionProps":{version_props},
              "files":[{{"name":"source","fileName":"main.c","fileId":"file-1","sha256":"{}","sizeBytes":13}}]}}"#,
@@ -248,6 +277,74 @@ fn judge(
     )
 }
 
+/// A Server that hands out two jobs, and takes them both back.
+///
+/// **Two rather than one**, because the thing under test is *every* job: this
+/// Runner holds a pool, and a release loop that stopped after the first would
+/// pass any test written against a Runner that holds one.
+async fn server_handing_out_two(mock: &MockServer) {
+    for (job_id, submission_id) in [("job-1", "sub-1"), ("job-2", "sub-2")] {
+        Mock::given(method("POST"))
+            .and(path("/api/v1/runner/jobs/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(job_named(
+                job_id,
+                submission_id,
+                &format!("token-for-{job_id}"),
+                r#"{"language":"c89-gcc"}"#,
+                r#"{"languages":[]}"#,
+                r#"{"uva":{"problemNumber":100}}"#,
+            )))
+            .up_to_n_times(1)
+            .mount(mock)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/claim"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/runner/files/file-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SOURCE))
+        .mount(mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/heartbeat"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(mock)
+        .await;
+
+    for job_id in ["job-1", "job-2"] {
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/runner/jobs/{job_id}/progress")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/runner/jobs/{job_id}/release")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/runner/jobs/{job_id}/lease")))
+            .respond_with(renewed())
+            .mount(mock)
+            .await;
+        // Mounted although nothing should ever post it: an unmatched request is
+        // refused, and a refused report looks to the loop like a Server that is
+        // briefly unwell — so it would be retried, logged, and never asserted
+        // on. Answered, it lands in the record where the assertion can see it.
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/runner/jobs/{job_id}/report")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"resultId":"result-1","state":"completed","duplicate":false}"#,
+            ))
+            .mount(mock)
+            .await;
+    }
+}
+
 /// Runs the loop until it has been quiet for a moment, then stops it.
 ///
 /// `work` never returns, so it is spawned and aborted. Everything asserted on is
@@ -258,14 +355,64 @@ async fn run_for(config: algojudge_external_runner::config::Config, how_long: Du
     let cache = Arc::new(aj_protocol::Cache::new(
         std::path::PathBuf::from(&config.cache_path),
         config.cache_max_bytes,
+        identity.fingerprint(),
     ));
     let judge = judge(&config);
     let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
 
-    let working = tokio::spawn(async move { runner.work(&identity).await });
+    let (stopping, _teller) = aj_protocol::stopping::Stopping::told();
+    let working = tokio::spawn(async move { runner.work(&identity, &stopping).await });
     tokio::time::sleep(how_long).await;
     working.abort();
     let _ = working.await;
+}
+
+/// Runs the loop, tells it to stop, and waits for it to return **on its own**.
+///
+/// The difference from `run_for` is the whole assertion: that one aborts the
+/// task, which can say nothing about what a stopped Runner does. Here a loop
+/// that ignored the word hangs, and the timeout is what says so.
+async fn run_until_stopped(
+    config: algojudge_external_runner::config::Config,
+    mock: &MockServer,
+    holding: usize,
+) {
+    let identity = aj_protocol::Identity::load_or_create(&config.key_path).expect("an identity");
+    let server = aj_protocol::Server::new(&config.server_base_url).expect("a Server");
+    let cache = Arc::new(aj_protocol::Cache::new(
+        std::path::PathBuf::from(&config.cache_path),
+        config.cache_max_bytes,
+        identity.fingerprint(),
+    ));
+    let judge = judge(&config);
+    let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
+
+    let (stopping, teller) = aj_protocol::stopping::Stopping::told();
+    let working = tokio::spawn(async move { runner.work(&identity, &stopping).await });
+
+    // **Stopped once it is actually holding them**, rather than after a sleep
+    // long enough to probably be. How many jobs the release has to walk is the
+    // one thing this measures, and a fixed wait would let the test's own timing
+    // decide it.
+    let mut held = 0;
+    for _ in 0..500 {
+        held = posted_to(&mock.received_requests().await.unwrap(), "/progress").len();
+        if held >= holding {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        held, holding,
+        "the Runner never took the work it is to hand back"
+    );
+
+    teller.stop();
+    tokio::time::timeout(Duration::from_secs(10), working)
+        .await
+        .expect("a stopped Runner returns instead of carrying on")
+        .expect("the loop panicked")
+        .expect("the loop ended with an error");
 }
 
 fn posted_to(sent: &[wiremock::Request], suffix: &str) -> Vec<String> {
@@ -457,5 +604,66 @@ async fn an_unreadable_problem_version_fails_once_with_the_message_that_names_th
     assert!(
         site.received_requests().await.unwrap().is_empty(),
         "a job that cannot be read must reach no archive",
+    );
+}
+
+/// **Told to stop, it hands back every job it is holding.**
+///
+/// There was no signal handler here at all before this: `SIGTERM` took the
+/// process down where it stood, and every submission it was waiting on sat out
+/// its lease — ten minutes on the Server's default — before anybody else could
+/// take it. The sandboxing Runner holds one job; this one holds up to
+/// `AJ_External__MaxPending`, so that is a queue of participants waiting on a
+/// deadline nobody is going to miss.
+///
+/// **And nothing is reported.** A stop is a systemic act, not a processing
+/// error: reporting a failure would spend one of the submission's attempts on
+/// an evaluation nothing was wrong with.
+#[tokio::test]
+async fn told_to_stop_it_hands_back_every_job_it_is_holding() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive_naming(&site, &[SID, SID + 1]).await;
+    uhunt(&hunt, 0).await;
+    server_handing_out_two(&mock).await;
+
+    run_until_stopped(
+        probe_config("stopped", &mock.uri(), &site.uri(), &hunt.uri()),
+        &mock,
+        2,
+    )
+    .await;
+
+    let sent = mock.received_requests().await.unwrap();
+    let released: Vec<(String, String)> = sent
+        .iter()
+        .filter(|r| r.url.path().ends_with("/release"))
+        .map(|r| {
+            (
+                r.url.path().to_owned(),
+                String::from_utf8_lossy(&r.body).into_owned(),
+            )
+        })
+        .collect();
+
+    assert_eq!(released.len(), 2, "both go back, not one: {released:?}");
+    for job_id in ["job-1", "job-2"] {
+        let found = released
+            .iter()
+            .find(|(path, _)| path.ends_with(&format!("/{job_id}/release")))
+            .unwrap_or_else(|| panic!("{job_id} was not given back: {released:?}"));
+        // The lease it is holding, not a blank: the Server refuses a release
+        // that cannot prove the job is this Runner's.
+        assert!(
+            found.1.contains(&format!("token-for-{job_id}")),
+            "{job_id} was released without its lease: {}",
+            found.1,
+        );
+    }
+
+    assert!(
+        posted_to(&sent, "/report").is_empty(),
+        "a stopped Runner reported on work it did not finish",
     );
 }

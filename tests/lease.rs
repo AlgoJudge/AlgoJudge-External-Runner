@@ -236,13 +236,17 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
     let cache = Arc::new(aj_protocol::Cache::new(
         std::path::PathBuf::from(&config.cache_path),
         config.cache_max_bytes,
+        identity.fingerprint(),
     ));
     let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
 
     let working = tokio::spawn(async move {
         // Reported rather than swallowed: this returning at all is a fault, and
         // the loop is the only thing that knows why.
-        if let Err(e) = runner.work(&identity).await {
+        // Never told to stop: this test ends by aborting the task, and what a
+        // stopped Runner does is `loop.rs`'s business.
+        let (stopping, _teller) = aj_protocol::stopping::Stopping::told();
+        if let Err(e) = runner.work(&identity, &stopping).await {
             tracing::error!(%e, "the Runner's loop gave up");
         }
     });

@@ -52,6 +52,18 @@ already scale.
 | Registers as | `external: false` | **`external: true`** |
 | Trials | measures them | refuses them |
 | Runtime image | `Dockerfile`, distroless | `Dockerfile`, distroless and smaller |
+| Jobs held at once | one | up to `AJ_External__MaxPending`, 20 by default |
+| Told to stop | gives its one job back | gives **every** held job back |
+
+**On `SIGTERM` every held job goes back to the queue**, and the process exits
+without reporting on any of them: the platform is taking their Runner away, and
+nothing was wrong with the submissions. What cannot go back is the submission
+already sitting on the archive under this installation's account, so the answer
+still coming from there arrives with nowhere to land and whoever claims the job
+next sends the same solution again. That is what a restart has always cost; what
+a polite stop saves is the lease each of those jobs would otherwise have sat
+out. Give it room: twenty jobs is twenty calls to the Server, and `AlgoJudge-Ops`
+allows sixty seconds for them.
 
 **`external: true` is not a detail.** The Server pairs a problem with a Runner on
 that flag and the problem's own, by equality — so a Runner that forwards and does
