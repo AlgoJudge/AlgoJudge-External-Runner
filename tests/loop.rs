@@ -420,6 +420,192 @@ async fn run_until_stopped(
         .expect("the loop ended with an error");
 }
 
+/// **A stop that lands while the Server is holding the claim open.**
+///
+/// The claim is answered a second after the word arrives, which is the window
+/// that existed at every default: the stop was checked *before* a call the
+/// Server may hold for twenty-five seconds, so it cancelled nothing. Two things
+/// then went wrong, and this asserts both.
+///
+/// The job must be **given back** — dropping the request aborts it, and the
+/// Server commits a handout before writing the answer to it, so the job would
+/// sit leased with nobody holding it until the lease ran out.
+///
+/// And it must **never reach the judge**. Forwarding it puts a real submission
+/// on somebody else's account that this installation is about to abandon and
+/// will never harvest, and then hands the job back for the next Runner to
+/// forward again: two submissions for one attempt. The archive is mocked so
+/// that a forward would succeed — an assertion that nothing was submitted means
+/// nothing if submitting could not have worked.
+#[tokio::test]
+async fn a_job_arriving_as_the_stop_lands_is_given_back_and_never_forwarded() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive(&site).await;
+    uhunt(&hunt, 0).await;
+
+    // Held for a second, which is longer than the stop takes to arrive and
+    // shorter than the two seconds a stop waits for an answer already in
+    // flight.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/claim"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(job(
+                    r#"{"language":"c89-gcc"}"#,
+                    r#"{"languages":[]}"#,
+                    r#"{"uva":{"problemNumber":100}}"#,
+                ))
+                .set_delay(Duration::from_millis(1000)),
+        )
+        .up_to_n_times(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/claim"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/job-1/release"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/heartbeat"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock)
+        .await;
+    // Mounted so that forwarding *could* happen: the source it would fetch.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/runner/files/file-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SOURCE))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/job-1/progress"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock)
+        .await;
+
+    let mut config = probe_config("settling", &mock.uri(), &site.uri(), &hunt.uri());
+    // The whole point: a Server that holds the claim open. Every other test in
+    // this file asks for no wait.
+    config.poll_wait = 25;
+
+    let identity = aj_protocol::Identity::load_or_create(&config.key_path).expect("an identity");
+    let server = aj_protocol::Server::new(&config.server_base_url).expect("a Server");
+    let cache = Arc::new(aj_protocol::Cache::new(
+        std::path::PathBuf::from(&config.cache_path),
+        config.cache_max_bytes,
+        identity.fingerprint(),
+    ));
+    let judge = judge(&config);
+    let mut runner =
+        algojudge_external_runner::run::Runner::new(Arc::new(server), cache, judge, config);
+
+    let (stopping, teller) = aj_protocol::stopping::Stopping::told();
+    let working = tokio::spawn(async move { runner.work(&identity, &stopping).await });
+
+    // Stopped while the claim is in flight and before it is answered.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    teller.stop();
+
+    tokio::time::timeout(Duration::from_secs(10), working)
+        .await
+        .expect("a stopped Runner returns instead of waiting the poll out")
+        .expect("the loop panicked")
+        .expect("the loop ended with an error");
+
+    let sent = mock.received_requests().await.unwrap();
+    assert_eq!(
+        posted_to(&sent, "/release").len(),
+        1,
+        "the job the Server handed over as the stop landed was not given back"
+    );
+
+    let forwarded = site
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            r.method == wiremock::http::Method::POST
+                && r.url.query().is_some_and(|q| q.contains("save_submission"))
+        })
+        .count();
+    assert_eq!(
+        forwarded, 0,
+        "a job taken on after the stop was forwarded to the judge and then abandoned"
+    );
+}
+
+/// **A stop is heard while waiting to be approved.**
+///
+/// Waiting for a manager to press approve is the longest thing this Runner ever
+/// does — the backoff climbs to a minute and the loop has no end — and until
+/// 2026-09-04 `admitted` took no stop handle at all. That was harmless on the
+/// path `main` uses, where no handler is installed yet and an uncaught
+/// `SIGTERM` takes the process down at once; it was not harmless on the path
+/// that matters, because `work` **re-enters** `admitted` whenever the Server
+/// forgets its token, and there a handler *is* installed. The signal was caught
+/// and then slept through, so a Runner whose token expired while the Server was
+/// down could only be stopped by killing it — and a kill strands everything it
+/// was holding for the full lease.
+///
+/// The assertion is the *latency*. This Server never approves, so without the
+/// stop arm the call does not return at all.
+#[tokio::test]
+async fn a_stop_is_heard_while_waiting_to_be_approved() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+
+    // Registered, and never approved.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/register"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"runnerId":"runner-1","fingerprint":"unused","state":"pendingApproval"}"#,
+        ))
+        .mount(&mock)
+        .await;
+
+    let config = probe_config("unapproved", &mock.uri(), &site.uri(), &hunt.uri());
+    let identity = aj_protocol::Identity::load_or_create(&config.key_path).expect("an identity");
+    let server = aj_protocol::Server::new(&config.server_base_url).expect("a Server");
+    let judge = judge(&config);
+
+    let (stopping, teller) = aj_protocol::stopping::Stopping::told();
+    let waiting = tokio::spawn(async move {
+        algojudge_external_runner::run::admitted(&server, &identity, &config, &judge, &stopping)
+            .await
+    });
+
+    // Long enough to be inside the backoff rather than still on the first call.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let began = tokio::time::Instant::now();
+    teller.stop();
+
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("a Runner told to stop while waiting for approval returns")
+        .expect("the task panicked")
+        .expect("waiting to be approved is not a failure");
+
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "it took {:?} to hear the word, so it slept the backoff out",
+        began.elapsed(),
+    );
+
+    // It never got in, so it never asked for work.
+    assert!(
+        posted_to(&mock.received_requests().await.unwrap(), "/claim").is_empty(),
+        "an unapproved Runner asked for a job",
+    );
+}
+
 fn posted_to(sent: &[wiremock::Request], suffix: &str) -> Vec<String> {
     sent.iter()
         .filter(|r| r.url.path().ends_with(suffix))

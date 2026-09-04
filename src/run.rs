@@ -68,36 +68,51 @@ pub async fn admitted<J: Judge>(
     identity: &Identity,
     config: &Config,
     judge: &J,
+    stopping: &Stopping,
 ) -> anyhow::Result<()> {
     let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(60));
 
     loop {
         let asked = server
-            .register(&Register {
-                name: config.runner_name.clone(),
-                product: PRODUCT.into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                public_key: identity.public_key(),
-                problem_types: declared(config, judge),
-                // **The whole point of this Runner, declared.** Every submission
-                // it takes leaves the installation, and the Server pairs work with
-                // workers on this: without it an external problem is never handed
-                // over, and the queue simply looks empty.
-                external: true,
-                tags: config.tags.clone(),
-                machine: None,
-            })
+            .register(
+                &Register {
+                    name: config.runner_name.clone(),
+                    product: PRODUCT.into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    public_key: identity.public_key(),
+                    problem_types: declared(config, judge),
+                    // **The whole point of this Runner, declared.** Every submission
+                    // it takes leaves the installation, and the Server pairs work with
+                    // workers on this: without it an external problem is never handed
+                    // over, and the queue simply looks empty.
+                    external: true,
+                    tags: config.tags.clone(),
+                    machine: None,
+                },
+                identity,
+            )
             .await;
 
         match asked {
             Ok(registered) if registered.approved() => break,
+            // **Every wait here is raced against the word.** Waiting for a
+            // manager to press approve is the longest thing this Runner ever
+            // does, and until 2026-09-04 it took no stop handle at all — so a
+            // Runner waiting to be let in could only be stopped by killing it,
+            // and a kill leaves nothing behind but a container the runtime shot.
             Ok(_) => {
                 tracing::info!("registered and waiting to be approved by a manager");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) if e.retryable() || e.unavailable() => {
                 tracing::warn!(%e, "the Server could not take the registration");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) => return Err(anyhow::anyhow!("the Server refused the registration: {e}")),
         }
@@ -109,11 +124,17 @@ pub async fn admitted<J: Judge>(
             Ok(()) => return Ok(()),
             Err(e) if e.not_approved() => {
                 tracing::info!("still waiting to be approved");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) if e.retryable() || e.unavailable() => {
                 tracing::warn!(%e, "the handshake could not be completed");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) => return Err(anyhow::anyhow!("the Server refused the handshake: {e}")),
         }
@@ -128,6 +149,14 @@ pub struct Runner<J: Judge> {
     pub judge: J,
     pub config: Config,
     pending: Pending,
+
+    /// **Held rather than passed**, because the waits that have to hear it are
+    /// not all in `work`: the report retry is four calls down, and threading a
+    /// handle through `harvest`, `expire` and `give_up` to reach it would put
+    /// the argument everywhere except where it is read.
+    ///
+    /// Set when `work` starts. Before that there is nothing to stop.
+    stopping: Stopping,
 }
 
 impl<J: Judge> Runner<J> {
@@ -138,6 +167,9 @@ impl<J: Judge> Runner<J> {
             judge,
             config,
             pending: Pending::default(),
+            // Replaced by `work`'s own handle. A Runner that has not started
+            // has nothing to hand back, so this one is never waited on.
+            stopping: Stopping::told().0,
         }
     }
 
@@ -148,6 +180,9 @@ impl<J: Judge> Runner<J> {
     /// `AJ_External__MaxPending`, and a lease left to expire costs each of those
     /// participants the whole of it.
     pub async fn work(&mut self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
+        // Kept, so the report retry four calls down hears it too.
+        self.stopping = stopping.clone();
+
         let mut claiming = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
         let mut ask_judge_at = Instant::now();
 
@@ -192,11 +227,48 @@ impl<J: Judge> Runner<J> {
                 let wait =
                     (self.config.poll_wait > 0).then(|| Duration::from_secs(self.config.poll_wait));
                 let asked = Instant::now();
-                match self
-                    .server
-                    .claim(Some(self.config.lease_seconds), wait)
-                    .await
-                {
+                // **Raced against the stop, which it was not until 2026-09-04.**
+                // The check above happens before a call the Server may hold open
+                // for the whole of `poll_wait`, so a stop arriving during the
+                // hold cancelled nothing: the process sat there uninterruptible
+                // while its grace ran out, and everything it had already
+                // forwarded to the judge stayed leased for the full lease
+                // instead of being handed back.
+                //
+                // Settled rather than dropped when the stop wins, for the reason
+                // the sandboxing Runner gives at its own claim: the Server
+                // commits a handout before writing the answer to it, so a
+                // dropped request is sometimes a job this Runner owns and cannot
+                // release, never having learned the lease token. Two seconds is
+                // a response in flight; it is not a poll.
+                // Cloned so the future in flight borrows this handle rather
+                // than `self` — the stopping arm below hands work back, and
+                // that needs the Runner itself.
+                let server = Arc::clone(&self.server);
+                let mut claim = std::pin::pin!(server.claim(Some(self.config.lease_seconds), wait));
+                let claimed = tokio::select! {
+                    // An answer already in hand beats a stop that arrived with
+                    // it, rather than a coin flip that throws the job away.
+                    biased;
+                    claimed = &mut claim => claimed,
+                    _ = stopping.wait() => {
+                        if let Ok(Ok(Some(job))) =
+                            tokio::time::timeout(SETTLE, &mut claim).await
+                        {
+                            // **Released, never forwarded.** Taking it would put
+                            // a real submission on the judge's account that this
+                            // installation is about to abandon, and then hand
+                            // the job back for the next Runner to forward again
+                            // — two submissions on somebody else's site for one
+                            // attempt.
+                            gave_back(&server, &job).await;
+                        }
+                        beating.abort();
+                        self.give_everything_back().await;
+                        return Ok(());
+                    }
+                };
+                match claimed {
                     Ok(Some(job)) => {
                         // **Asked and granted, side by side.** The Server may
                         // apply its own default when it reads no request, and
@@ -210,6 +282,21 @@ impl<J: Judge> Runner<J> {
                             "claimed"
                         );
                         claiming.reset();
+
+                        // **Asked again between the answer and the forward.**
+                        // `biased` hands over a job that arrived at the same
+                        // instant as the stop, which is right — but forwarding
+                        // it would submit to the judge on the way out and then
+                        // release the job below, so the next Runner forwards it
+                        // a second time. Giving it straight back costs one round
+                        // trip and nothing else.
+                        if stopping.now() {
+                            gave_back(&server, &job).await;
+                            beating.abort();
+                            self.give_everything_back().await;
+                            return Ok(());
+                        }
+
                         self.take(job).await;
                         continue;
                     }
@@ -224,7 +311,8 @@ impl<J: Judge> Runner<J> {
                     Err(e) if e.needs_handshake() => {
                         self.server.forget_token();
                         if let Err(e) =
-                            admitted(&self.server, identity, &self.config, &self.judge).await
+                            admitted(&self.server, identity, &self.config, &self.judge, stopping)
+                                .await
                         {
                             beating.abort();
                             return Err(e);
@@ -705,6 +793,12 @@ impl<J: Judge> Runner<J> {
 
     /// Retried for as long as it takes: the report is idempotent, so trying
     /// again is always safe, and a lost lease is the one answer to stop on.
+    ///
+    /// **Or until the word comes.** Ten attempts backing off to thirty seconds
+    /// is the better part of five minutes with no stop arm, against a grace of
+    /// sixty — so a stop landing here was a `SIGKILL`, which drops this answer
+    /// too and takes every other release with it. The lease requeues the job
+    /// either way; the choice is only between losing it cleanly and losing more.
     async fn send(&self, job_id: &str, report: &ReportResult) {
         let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(30));
         for _ in 0..10 {
@@ -716,12 +810,44 @@ impl<J: Judge> Runner<J> {
                 }
                 Err(e) => {
                     tracing::warn!(%e, job = %job_id, "the report did not land");
-                    backoff.wait().await;
+                    tokio::select! {
+                        _ = backoff.wait() => {}
+                        _ = self.stopping.wait() => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "told to stop while carrying an answer; the lease will requeue the job",
+                            );
+                            return;
+                        }
+                    }
                 }
             }
         }
     }
 }
+
+/// Hands one job straight back, without ever having forwarded it.
+///
+/// **The same refusals `give_everything_back` tolerates**, for the same reason:
+/// a lease that is already gone means the Server has put the job back, which is
+/// the outcome this was asking for.
+async fn gave_back(server: &Arc<Server>, job: &ClaimedJob) {
+    match server.release(&job.job_id, &job.lease_token).await {
+        Ok(()) => tracing::info!(job = %job.job_id, "gave the job back"),
+        Err(e) if e.lease_lost() => tracing::info!(job = %job.job_id, "the job was already back"),
+        Err(e) => tracing::warn!(
+            job = %job.job_id, %e,
+            "could not give the job back; it returns when the lease expires",
+        ),
+    }
+}
+
+/// How long a stop waits for a claim already in flight to answer.
+///
+/// **Long enough for a response, far too short for a poll.** The same number and
+/// the same argument as the sandboxing Runner's; the reasoning is written at the
+/// stopping arm in `work`, which is the only place it is used.
+const SETTLE: Duration = Duration::from_secs(2);
 
 /// How often this Runner says it is alive.
 ///

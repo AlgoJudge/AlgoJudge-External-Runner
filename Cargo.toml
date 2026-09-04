@@ -12,7 +12,7 @@ repository = "https://github.com/AlgoJudge/AlgoJudge-External-Runner"
 # tags, so a revision is the only stable name; and the contract is `Accepted`
 # (v1.1, 2026-08-08) while only one implementation is released, which is why the
 # crate stays where it is rather than being extracted.
-aj-protocol = { git = "https://github.com/AlgoJudge/AlgoJudge-Runner", rev = "4427f0599f5b270d152084000f2f7de72c0d97f3" }
+aj-protocol = { git = "https://github.com/AlgoJudge/AlgoJudge-Runner", rev = "490d2e26038dccaf1228178b45205d78452a2cd9" }
 
 anyhow = "1.0"
 # `cookies` is the one feature this Runner needs that the sandboxing Runner does

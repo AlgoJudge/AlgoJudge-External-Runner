@@ -109,7 +109,18 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
 
     // Nothing touches the judge before this point: a Runner that starts while
     // the judging system is down still registers and waits.
-    run::admitted(&server, &identity, &config, &judge).await?;
+    // The handle is one nothing says the word to, for the reason the comment
+    // below gives. `admitted` takes one because it is **re-entered from inside
+    // `work`**, where a handler is installed and the same waits have to hear it.
+    let (before_anything_is_held, _never) = aj_protocol::stopping::Stopping::told();
+    run::admitted(
+        &server,
+        &identity,
+        &config,
+        &judge,
+        &before_anything_is_held,
+    )
+    .await?;
 
     // **Listening starts after registration**, as it does in the sandboxing
     // Runner: a Runner still waiting to be approved holds nothing, so the

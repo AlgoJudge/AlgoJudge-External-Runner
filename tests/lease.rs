@@ -224,7 +224,8 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
     // The judge is built before admission because registration declares what it
     // serves: an empty `AJ_Runner__ProblemTypes` is the judge's own type.
     let judge = probe_judge(&site.uri(), &hunt.uri());
-    algojudge_external_runner::run::admitted(&server, &identity, &config, &judge)
+    let (never, _teller) = aj_protocol::stopping::Stopping::told();
+    algojudge_external_runner::run::admitted(&server, &identity, &config, &judge, &never)
         .await
         .expect("being admitted");
     approving.abort();
