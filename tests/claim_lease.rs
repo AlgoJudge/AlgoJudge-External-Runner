@@ -30,7 +30,7 @@ async fn a_claim_asks_for_the_lease_it_was_configured_with() {
         .await;
 
     let client = aj_protocol::Server::new(&server.uri()).expect("a Server");
-    let taken = client.claim(Some(80)).await.expect("claiming");
+    let taken = client.claim(Some(80), None).await.expect("claiming");
     assert!(taken.is_none(), "204 means nothing matched");
 
     let sent = server
@@ -97,7 +97,7 @@ int main(){return 0;}
 
     let asked = 80u32;
     let job = loop {
-        match server.claim(Some(asked)).await.expect("claiming") {
+        match server.claim(Some(asked), None).await.expect("claiming") {
             Some(job) => break job,
             None => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
         }

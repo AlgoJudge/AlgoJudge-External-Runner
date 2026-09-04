@@ -364,6 +364,7 @@ fn probe_config(site: &str, hunt: &str) -> algojudge_external_runner::config::Co
             .into_owned(),
         cache_max_bytes: 64 * 1024 * 1024,
         lease_seconds: 80,
+        poll_wait: 0,
         external: algojudge_external_runner::config::External {
             judge: "uva".into(),
             base_url: format!("{site}/"),
