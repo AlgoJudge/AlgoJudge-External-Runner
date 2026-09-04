@@ -27,7 +27,7 @@ dependencies = [
 [[package]]
 name = "aj-protocol"
 version = "0.1.0"
-source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=606a5c784f56b8939fc5ac6b67404353c1486032#606a5c784f56b8939fc5ac6b67404353c1486032"
+source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=6918ced57fc833b8f5d443880aa69ca22b034611#6918ced57fc833b8f5d443880aa69ca22b034611"
 dependencies = [
  "base64",
  "ed25519-dalek",

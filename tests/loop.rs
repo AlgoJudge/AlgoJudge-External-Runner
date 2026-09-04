@@ -239,6 +239,9 @@ fn probe_config(
         // is deliberately not called: the point is to reach a decision that
         // takes twenty minutes under any configuration the product allows.
         lease_seconds: 60,
+        // No wait: these tests drive the loop against a mock and assert on what
+        // it did, which a held request would only make slower to read.
+        poll_wait: 0,
         external: algojudge_external_runner::config::External {
             judge: "uva".into(),
             base_url: format!("{site}/"),

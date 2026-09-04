@@ -171,7 +171,13 @@ impl<J: Judge> Runner<J> {
             // decide on its own: asking the judge about the pending set happens
             // in between, and it is the slowest call this Runner makes.
             if !stopping.now() && self.pending.len() < self.config.external.max_pending {
-                match self.server.claim(Some(self.config.lease_seconds)).await {
+                let wait =
+                    (self.config.poll_wait > 0).then(|| Duration::from_secs(self.config.poll_wait));
+                match self
+                    .server
+                    .claim(Some(self.config.lease_seconds), wait)
+                    .await
+                {
                     Ok(Some(job)) => {
                         // **Asked and granted, side by side.** The Server may
                         // apply its own default when it reads no request, and

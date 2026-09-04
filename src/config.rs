@@ -142,6 +142,12 @@ pub struct Config {
     /// default while this Runner waited fifteen minutes on the judge would be
     /// claimed again and submitted a second time — to somebody else's site.
     pub lease_seconds: u32,
+    /// How long the Server may hold a `claim` open while the queue is empty.
+    ///
+    /// `0` asks for none, which is what this Runner did before the Server could
+    /// hold one. Anything else makes the claim backoff matter only after a
+    /// failure: on an empty queue the wait *is* the interval.
+    pub poll_wait: u64,
 
     pub external: External,
 }
@@ -203,6 +209,11 @@ impl Config {
             cache_path: var("Cache__Path").unwrap_or_else(|_| DEFAULT_CACHE_PATH.into()),
             cache_max_bytes: number("Cache__MaxBytes", DEFAULT_CACHE_MAX_BYTES)?,
             lease_seconds: number("Lease__RequestSeconds", 1200)? as u32,
+            // **The same name the sandboxing Runner uses**, because it means
+            // the same thing and an operator running both should not have to
+            // learn two. What bounds it is an intermediary rather than this
+            // Server; see that Runner's `.env.example` for the table.
+            poll_wait: number("Poll__WaitSeconds", 25)?,
 
             external: External {
                 judge: var("External__Judge").unwrap_or_else(|_| DEFAULT_JUDGE.into()),
@@ -427,6 +438,7 @@ mod tests {
             cache_path: "/tmp/cache".into(),
             cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
             lease_seconds: 1200,
+            poll_wait: 25,
             external: External {
                 judge: DEFAULT_JUDGE.into(),
                 base_url: "https://onlinejudge.org/".into(),
@@ -587,9 +599,14 @@ mod tests {
         let Some((section, rest)) = piece.split_once("__") else {
             return false;
         };
+        // **A closed list, and adding a section means adding it here.** Until
+        // 2026-09-04 `Poll` was missing, so `AJ_Poll__WaitSeconds` was read by
+        // the config and invisible to this check in both directions — it
+        // surfaced only when the key reached `.env.example` and was reported as
+        // listed and read by nothing.
         matches!(
             section,
-            "Server" | "Runner" | "Cache" | "External" | "Lease"
+            "Server" | "Runner" | "Cache" | "External" | "Lease" | "Poll"
         ) && !rest.is_empty()
             && rest.chars().all(|c| c.is_ascii_alphanumeric())
     }
