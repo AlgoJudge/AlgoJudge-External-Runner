@@ -68,10 +68,20 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
     // image was built to a path it could not see and shipped without the
     // directory — and the ceiling until the day after. See
     // `config::DEFAULT_CACHE_PATH` and `config::DEFAULT_CACHE_MAX_BYTES`.
+    //
+    // **Named for this Runner**, since 2026-09-04: a cache directory may be a
+    // volume two Runners share, and an entry one of them is reading must not be
+    // evicted by the other. The marker that says so carries the fingerprint,
+    // which is on disk and is the same again after a restart.
     let cache = std::sync::Arc::new(aj_protocol::Cache::new(
         std::path::PathBuf::from(&config.cache_path),
         config.cache_max_bytes,
+        identity.fingerprint(),
     ));
+    // What a previous incarnation of this Runner was reading when it stopped.
+    // Nobody else can release those, and an entry nobody can evict is a disk
+    // that fills.
+    cache.sweep();
 
     // **What it will declare, not what was configured.** An empty
     // `AJ_Runner__ProblemTypes` is the judge's own type, and a start-up line
@@ -100,6 +110,13 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
     // Nothing touches the judge before this point: a Runner that starts while
     // the judging system is down still registers and waits.
     run::admitted(&server, &identity, &config, &judge).await?;
+
+    // **Listening starts after registration**, as it does in the sandboxing
+    // Runner: a Runner still waiting to be approved holds nothing, so the
+    // default disposition -- which stops the process at once -- is the right
+    // answer, and catching the signal there would only make a stop hang.
+    let stopping = aj_protocol::stopping::Stopping::listen();
+
     let mut runner = run::Runner::new(server, cache, judge, config);
-    runner.work(&identity).await
+    runner.work(&identity, &stopping).await
 }
