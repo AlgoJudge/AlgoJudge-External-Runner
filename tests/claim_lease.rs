@@ -77,16 +77,19 @@ int main(){return 0;}
     let server = aj_protocol::Server::new(&stack::api()).expect("a Server");
 
     server
-        .register(&aj_protocol::wire::Register {
-            name: "claim-lease".into(),
-            product: algojudge_external_runner::run::PRODUCT.into(),
-            version: "0".into(),
-            public_key: identity.public_key(),
-            problem_types: vec!["uva@1".into()],
-            tags: vec![],
-            external: true,
-            machine: None,
-        })
+        .register(
+            &aj_protocol::wire::Register {
+                name: "claim-lease".into(),
+                product: algojudge_external_runner::run::PRODUCT.into(),
+                version: "0".into(),
+                public_key: identity.public_key(),
+                problem_types: vec!["uva@1".into()],
+                tags: vec![],
+                external: true,
+                machine: None,
+            },
+            &identity,
+        )
         .await
         .expect("registering");
     admin.approve_every_runner().await;

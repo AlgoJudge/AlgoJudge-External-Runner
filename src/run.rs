@@ -74,20 +74,23 @@ pub async fn admitted<J: Judge>(
 
     loop {
         let asked = server
-            .register(&Register {
-                name: config.runner_name.clone(),
-                product: PRODUCT.into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                public_key: identity.public_key(),
-                problem_types: declared(config, judge),
-                // **The whole point of this Runner, declared.** Every submission
-                // it takes leaves the installation, and the Server pairs work with
-                // workers on this: without it an external problem is never handed
-                // over, and the queue simply looks empty.
-                external: true,
-                tags: config.tags.clone(),
-                machine: None,
-            })
+            .register(
+                &Register {
+                    name: config.runner_name.clone(),
+                    product: PRODUCT.into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    public_key: identity.public_key(),
+                    problem_types: declared(config, judge),
+                    // **The whole point of this Runner, declared.** Every submission
+                    // it takes leaves the installation, and the Server pairs work with
+                    // workers on this: without it an external problem is never handed
+                    // over, and the queue simply looks empty.
+                    external: true,
+                    tags: config.tags.clone(),
+                    machine: None,
+                },
+                identity,
+            )
             .await;
 
         match asked {
