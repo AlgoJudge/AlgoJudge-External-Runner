@@ -121,7 +121,9 @@ pub async fn admitted<J: Judge>(
 }
 
 pub struct Runner<J: Judge> {
-    pub server: Server,
+    /// **Shared, so the heartbeat can hold one too.** Liveness runs on a timer
+    /// of its own rather than at the bottom of this loop — see `heartbeat`.
+    pub server: Arc<Server>,
     pub cache: Arc<Cache>,
     pub judge: J,
     pub config: Config,
@@ -129,7 +131,7 @@ pub struct Runner<J: Judge> {
 }
 
 impl<J: Judge> Runner<J> {
-    pub fn new(server: Server, cache: Arc<Cache>, judge: J, config: Config) -> Self {
+    pub fn new(server: Arc<Server>, cache: Arc<Cache>, judge: J, config: Config) -> Self {
         Self {
             server,
             cache,
@@ -148,7 +150,18 @@ impl<J: Judge> Runner<J> {
     pub async fn work(&mut self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
         let mut claiming = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
         let mut ask_judge_at = Instant::now();
-        let mut beat_at = Instant::now();
+
+        // **Liveness on a timer of its own.** It used to be a threshold checked
+        // at the bottom of this loop, which was fine while an iteration was a
+        // second or two. A held claim made the iteration tens of seconds, so a
+        // sixty-second threshold fired every second pass — an effective beat of
+        // about a hundred and ten seconds against a Server that calls a Runner
+        // disconnected after a hundred and twenty.
+        //
+        // It also covers what the loop never could: this Runner spends most of
+        // its life waiting on somebody else's archive, and a cycle of that is
+        // not a moment it should have to remember to say it is alive in.
+        let beating = heartbeat(Arc::clone(&self.server), stopping.clone());
 
         loop {
             // **Checked first, so a stop is acted on before another cycle of
@@ -156,6 +169,7 @@ impl<J: Judge> Runner<J> {
             // this loop does, and the jobs it would ask about are the ones being
             // given back.
             if stopping.now() {
+                beating.abort();
                 self.give_everything_back().await;
                 return Ok(());
             }
@@ -170,9 +184,14 @@ impl<J: Judge> Runner<J> {
             // **And not while stopping**, which the top of the loop cannot
             // decide on its own: asking the judge about the pending set happens
             // in between, and it is the slowest call this Runner makes.
+            // Whether the Server held the last claim open, which decides
+            // whether there is anything left to wait for below.
+            let mut held = false;
+
             if !stopping.now() && self.pending.len() < self.config.external.max_pending {
                 let wait =
                     (self.config.poll_wait > 0).then(|| Duration::from_secs(self.config.poll_wait));
+                let asked = Instant::now();
                 match self
                     .server
                     .claim(Some(self.config.lease_seconds), wait)
@@ -194,21 +213,26 @@ impl<J: Judge> Runner<J> {
                         self.take(job).await;
                         continue;
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        // **Told apart by how long it took**, not by the
+                        // setting: a Server that does not know about
+                        // `waitSeconds` answers at once, and so does one that is
+                        // draining, and neither should be asked again
+                        // immediately.
+                        held = wait.is_some_and(|wait| asked.elapsed() >= wait / 2);
+                    }
                     Err(e) if e.needs_handshake() => {
                         self.server.forget_token();
-                        admitted(&self.server, identity, &self.config, &self.judge).await?;
+                        if let Err(e) =
+                            admitted(&self.server, identity, &self.config, &self.judge).await
+                        {
+                            beating.abort();
+                            return Err(e);
+                        }
                         continue;
                     }
                     Err(e) => tracing::warn!(%e, "could not ask for work"),
                 }
-            }
-
-            if beat_at.elapsed() >= Duration::from_secs(60) {
-                if let Err(e) = self.server.heartbeat().await {
-                    tracing::warn!(%e, "the heartbeat did not land");
-                }
-                beat_at = Instant::now();
             }
 
             // Nothing outstanding: sleep as the ordinary Runner does. Something
@@ -219,9 +243,16 @@ impl<J: Judge> Runner<J> {
             // that sat out either of them before releasing would be holding
             // leases for no reason at all.
             if self.pending.is_empty() {
-                tokio::select! {
-                    _ = claiming.wait() => {}
-                    _ = stopping.wait() => {}
+                // **No backoff after a claim the Server held.** The wait *was*
+                // the interval; sleeping again would leave this Runner deaf for
+                // the thirty seconds the backoff has climbed to, and a
+                // submission arriving in that window waits it out — the old
+                // latency, on the new machinery.
+                if !held {
+                    tokio::select! {
+                        _ = claiming.wait() => {}
+                        _ = stopping.wait() => {}
+                    }
                 }
             } else {
                 let until = ask_judge_at.saturating_duration_since(Instant::now());
@@ -690,6 +721,35 @@ impl<J: Judge> Runner<J> {
             }
         }
     }
+}
+
+/// How often this Runner says it is alive.
+///
+/// **Not configurable, unlike the sandboxing Runner's.** That one is set per
+/// fleet member because a fleet is many processes on one host; this is one
+/// process against one judging system, and a number nobody would ever want to
+/// change is better as a constant than as a key in `.env.example`.
+const HEARTBEAT: Duration = Duration::from_secs(60);
+
+/// Says this Runner is alive, on its own timer, until it is told to stop.
+///
+/// **Not tied to the loop, and not to the judge's cycle.** The Server calls a
+/// Runner disconnected when what it last heard is two minutes old, and neither
+/// a held claim nor a poll of somebody else's archive is a number chosen
+/// against that.
+fn heartbeat(server: Arc<Server>, stopping: Stopping) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(HEARTBEAT) => {}
+                _ = stopping.wait() => return,
+            }
+
+            if let Err(e) = server.heartbeat().await {
+                tracing::warn!(%e, "the heartbeat did not land");
+            }
+        }
+    })
 }
 
 /// Which member of a submission's `props` names the language.

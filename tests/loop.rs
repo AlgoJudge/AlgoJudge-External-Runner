@@ -361,7 +361,8 @@ async fn run_for(config: algojudge_external_runner::config::Config, how_long: Du
         identity.fingerprint(),
     ));
     let judge = judge(&config);
-    let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
+    let mut runner =
+        algojudge_external_runner::run::Runner::new(Arc::new(server), cache, judge, config);
 
     let (stopping, _teller) = aj_protocol::stopping::Stopping::told();
     let working = tokio::spawn(async move { runner.work(&identity, &stopping).await });
@@ -388,7 +389,8 @@ async fn run_until_stopped(
         identity.fingerprint(),
     ));
     let judge = judge(&config);
-    let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
+    let mut runner =
+        algojudge_external_runner::run::Runner::new(Arc::new(server), cache, judge, config);
 
     let (stopping, teller) = aj_protocol::stopping::Stopping::told();
     let working = tokio::spawn(async move { runner.work(&identity, &stopping).await });

@@ -238,7 +238,8 @@ async fn a_held_job_outlives_the_lease_it_was_granted() {
         config.cache_max_bytes,
         identity.fingerprint(),
     ));
-    let mut runner = algojudge_external_runner::run::Runner::new(server, cache, judge, config);
+    let mut runner =
+        algojudge_external_runner::run::Runner::new(Arc::new(server), cache, judge, config);
 
     let working = tokio::spawn(async move {
         // Reported rather than swallowed: this returning at all is a fault, and
