@@ -541,6 +541,71 @@ async fn a_job_arriving_as_the_stop_lands_is_given_back_and_never_forwarded() {
     );
 }
 
+/// **A stop is heard while waiting to be approved.**
+///
+/// Waiting for a manager to press approve is the longest thing this Runner ever
+/// does — the backoff climbs to a minute and the loop has no end — and until
+/// 2026-09-04 `admitted` took no stop handle at all. That was harmless on the
+/// path `main` uses, where no handler is installed yet and an uncaught
+/// `SIGTERM` takes the process down at once; it was not harmless on the path
+/// that matters, because `work` **re-enters** `admitted` whenever the Server
+/// forgets its token, and there a handler *is* installed. The signal was caught
+/// and then slept through, so a Runner whose token expired while the Server was
+/// down could only be stopped by killing it — and a kill strands everything it
+/// was holding for the full lease.
+///
+/// The assertion is the *latency*. This Server never approves, so without the
+/// stop arm the call does not return at all.
+#[tokio::test]
+async fn a_stop_is_heard_while_waiting_to_be_approved() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+
+    // Registered, and never approved.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/register"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"runnerId":"runner-1","fingerprint":"unused","state":"pendingApproval"}"#,
+        ))
+        .mount(&mock)
+        .await;
+
+    let config = probe_config("unapproved", &mock.uri(), &site.uri(), &hunt.uri());
+    let identity = aj_protocol::Identity::load_or_create(&config.key_path).expect("an identity");
+    let server = aj_protocol::Server::new(&config.server_base_url).expect("a Server");
+    let judge = judge(&config);
+
+    let (stopping, teller) = aj_protocol::stopping::Stopping::told();
+    let waiting = tokio::spawn(async move {
+        algojudge_external_runner::run::admitted(&server, &identity, &config, &judge, &stopping)
+            .await
+    });
+
+    // Long enough to be inside the backoff rather than still on the first call.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let began = tokio::time::Instant::now();
+    teller.stop();
+
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("a Runner told to stop while waiting for approval returns")
+        .expect("the task panicked")
+        .expect("waiting to be approved is not a failure");
+
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "it took {:?} to hear the word, so it slept the backoff out",
+        began.elapsed(),
+    );
+
+    // It never got in, so it never asked for work.
+    assert!(
+        posted_to(&mock.received_requests().await.unwrap(), "/claim").is_empty(),
+        "an unapproved Runner asked for a job",
+    );
+}
+
 fn posted_to(sent: &[wiremock::Request], suffix: &str) -> Vec<String> {
     sent.iter()
         .filter(|r| r.url.path().ends_with(suffix))

@@ -68,6 +68,7 @@ pub async fn admitted<J: Judge>(
     identity: &Identity,
     config: &Config,
     judge: &J,
+    stopping: &Stopping,
 ) -> anyhow::Result<()> {
     let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(60));
 
@@ -91,13 +92,24 @@ pub async fn admitted<J: Judge>(
 
         match asked {
             Ok(registered) if registered.approved() => break,
+            // **Every wait here is raced against the word.** Waiting for a
+            // manager to press approve is the longest thing this Runner ever
+            // does, and until 2026-09-04 it took no stop handle at all — so a
+            // Runner waiting to be let in could only be stopped by killing it,
+            // and a kill leaves nothing behind but a container the runtime shot.
             Ok(_) => {
                 tracing::info!("registered and waiting to be approved by a manager");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) if e.retryable() || e.unavailable() => {
                 tracing::warn!(%e, "the Server could not take the registration");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) => return Err(anyhow::anyhow!("the Server refused the registration: {e}")),
         }
@@ -109,11 +121,17 @@ pub async fn admitted<J: Judge>(
             Ok(()) => return Ok(()),
             Err(e) if e.not_approved() => {
                 tracing::info!("still waiting to be approved");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) if e.retryable() || e.unavailable() => {
                 tracing::warn!(%e, "the handshake could not be completed");
-                backoff.wait().await;
+                tokio::select! {
+                    _ = backoff.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
             }
             Err(e) => return Err(anyhow::anyhow!("the Server refused the handshake: {e}")),
         }
@@ -128,6 +146,14 @@ pub struct Runner<J: Judge> {
     pub judge: J,
     pub config: Config,
     pending: Pending,
+
+    /// **Held rather than passed**, because the waits that have to hear it are
+    /// not all in `work`: the report retry is four calls down, and threading a
+    /// handle through `harvest`, `expire` and `give_up` to reach it would put
+    /// the argument everywhere except where it is read.
+    ///
+    /// Set when `work` starts. Before that there is nothing to stop.
+    stopping: Stopping,
 }
 
 impl<J: Judge> Runner<J> {
@@ -138,6 +164,9 @@ impl<J: Judge> Runner<J> {
             judge,
             config,
             pending: Pending::default(),
+            // Replaced by `work`'s own handle. A Runner that has not started
+            // has nothing to hand back, so this one is never waited on.
+            stopping: Stopping::told().0,
         }
     }
 
@@ -148,6 +177,9 @@ impl<J: Judge> Runner<J> {
     /// `AJ_External__MaxPending`, and a lease left to expire costs each of those
     /// participants the whole of it.
     pub async fn work(&mut self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
+        // Kept, so the report retry four calls down hears it too.
+        self.stopping = stopping.clone();
+
         let mut claiming = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
         let mut ask_judge_at = Instant::now();
 
@@ -276,7 +308,8 @@ impl<J: Judge> Runner<J> {
                     Err(e) if e.needs_handshake() => {
                         self.server.forget_token();
                         if let Err(e) =
-                            admitted(&self.server, identity, &self.config, &self.judge).await
+                            admitted(&self.server, identity, &self.config, &self.judge, stopping)
+                                .await
                         {
                             beating.abort();
                             return Err(e);
@@ -757,6 +790,12 @@ impl<J: Judge> Runner<J> {
 
     /// Retried for as long as it takes: the report is idempotent, so trying
     /// again is always safe, and a lost lease is the one answer to stop on.
+    ///
+    /// **Or until the word comes.** Ten attempts backing off to thirty seconds
+    /// is the better part of five minutes with no stop arm, against a grace of
+    /// sixty — so a stop landing here was a `SIGKILL`, which drops this answer
+    /// too and takes every other release with it. The lease requeues the job
+    /// either way; the choice is only between losing it cleanly and losing more.
     async fn send(&self, job_id: &str, report: &ReportResult) {
         let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(30));
         for _ in 0..10 {
@@ -768,19 +807,22 @@ impl<J: Judge> Runner<J> {
                 }
                 Err(e) => {
                     tracing::warn!(%e, job = %job_id, "the report did not land");
-                    backoff.wait().await;
+                    tokio::select! {
+                        _ = backoff.wait() => {}
+                        _ = self.stopping.wait() => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "told to stop while carrying an answer; the lease will requeue the job",
+                            );
+                            return;
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/// How often this Runner says it is alive.
-///
-/// **Not configurable, unlike the sandboxing Runner's.** That one is set per
-/// fleet member because a fleet is many processes on one host; this is one
-/// process against one judging system, and a number nobody would ever want to
-/// change is better as a constant than as a key in `.env.example`.
 /// Hands one job straight back, without ever having forwarded it.
 ///
 /// **The same refusals `give_everything_back` tolerates**, for the same reason:
@@ -804,6 +846,12 @@ async fn gave_back(server: &Arc<Server>, job: &ClaimedJob) {
 /// stopping arm in `work`, which is the only place it is used.
 const SETTLE: Duration = Duration::from_secs(2);
 
+/// How often this Runner says it is alive.
+///
+/// **Not configurable, unlike the sandboxing Runner's.** That one is set per
+/// fleet member because a fleet is many processes on one host; this is one
+/// process against one judging system, and a number nobody would ever want to
+/// change is better as a constant than as a key in `.env.example`.
 const HEARTBEAT: Duration = Duration::from_secs(60);
 
 /// Says this Runner is alive, on its own timer, until it is told to stop.
