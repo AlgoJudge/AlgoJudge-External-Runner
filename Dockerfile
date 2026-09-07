@@ -54,7 +54,12 @@ RUN find src -name '*.rs' -exec touch {} + \
 # reported as an infrastructure failure with the archive never contacted.
 RUN mkdir -p /state/lib /state/cache
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# **Debian 13, the same release AlgoJudge-Runner publishes on.** The binary
+# is statically linked against musl, so what this base supplies is the CA
+# bundle, `/etc/passwd` and a writable `/tmp` rather than a libc — but two
+# Runners a Debian release apart is a difference nobody chose, and the older
+# one leaves support first.
+FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=build \
     /src/target/x86_64-unknown-linux-musl/release/algojudge-external-runner \
