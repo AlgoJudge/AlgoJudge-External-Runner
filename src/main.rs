@@ -97,13 +97,11 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
         tags = ?config.tags,
         "starting",
     );
-    if config.external.long_poll_enabled {
-        // Said out loud rather than left to be inferred from latency: the flag
-        // is accepted, the accelerator behind it is not built, and the interval
-        // net is doing the whole job.
-        tracing::warn!(
-            "AJ_External__LongPollEnabled is on, but the trigger is not built yet; \
-             verdicts arrive on the interval net alone"
+    if !config.external.long_poll_enabled {
+        // Said out loud, because the difference shows only as latency: a
+        // verdict then waits for the interval instead of for the archive.
+        tracing::info!(
+            "AJ_External__LongPollEnabled is off; verdicts arrive on the interval net alone"
         );
     }
 

@@ -14,6 +14,7 @@
 //! happens once at start-up, and object safety would buy nothing; the methods
 //! return `impl Future + Send` because the loop is driven from a spawned task.
 
+use std::future::Future;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -255,6 +256,21 @@ pub trait Judge: Send + Sync {
         props: Option<&serde_json::Value>,
         config: Option<&serde_json::Value>,
     ) -> anyhow::Result<Setup>;
+
+    /// **Waits until the judge gives a reason to ask, or until `within` is up.**
+    /// `true` means something happened; `false` means the wait simply ended.
+    ///
+    /// The default never fires, so an integration without a live channel keeps
+    /// the interval net alone and needs no code for this. Where a judge has one,
+    /// it is a **trigger and never a source of verdicts**: what it delivers may
+    /// be lossy, and a missed verdict is a submission that hangs until it times
+    /// out, which is a correctness failure rather than a slow one.
+    fn wait_for_a_sign(&mut self, within: Duration) -> impl Future<Output = bool> + Send {
+        async move {
+            tokio::time::sleep(within).await;
+            false
+        }
+    }
 
     /// The judge's internal id for a problem, which its answers carry.
     ///

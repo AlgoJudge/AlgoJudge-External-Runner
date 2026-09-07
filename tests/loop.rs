@@ -103,6 +103,17 @@ async fn uhunt(server: &MockServer, verdict: i64) {
         )))
         .mount(server)
         .await;
+    // **The live stream, and by default it says nothing.** A test that wants the
+    // accelerator to fire mounts its own at a higher priority.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/poll/\d+$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("[]")
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .mount(server)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/subs-user/.*$"))
         .respond_with(ResponseTemplate::new(200).set_body_string(format!(
@@ -933,5 +944,94 @@ async fn a_source_that_is_not_text_is_a_verdict_and_not_a_failure() {
     assert!(
         tried.iter().all(|r| !r.url.path().contains("submit")),
         "a file that cannot be decoded was still offered to the archive",
+    );
+}
+
+/// **The accelerator earns the flat net, or it is a regression.**
+///
+/// With the stream on the interval is one request a minute, so a verdict that
+/// waits for the interval waits a minute. The trigger exists so that it does
+/// not — and a version that flattened the net while never firing would be
+/// strictly worse than having no accelerator at all.
+///
+/// **The first ask is deliberately fruitless**, because the loop asks once as
+/// soon as it has something outstanding: without that, this test would pass on
+/// the immediate harvest and prove nothing about the stream.
+///
+/// **What it does not cover is when the cursor is taken.** The stand-in answers
+/// the same event whatever cursor it is given, so a Runner that took the head
+/// *after* submitting still passes here — while against the archive it loses
+/// every verdict that landed in the opening batch, which is what a fast judge
+/// produces. That one is held by `Uva::take_the_stream_head` being called from
+/// `submit`, and was found by measuring against onlinejudge.org rather than
+/// here: 64 s to a verdict with the cursor taken late, against 20-28 s with no
+/// accelerator at all.
+#[tokio::test]
+async fn an_event_about_our_account_is_answered_without_waiting_for_the_interval() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive(&site).await;
+
+    // Still in the queue when the loop asks of its own accord.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/subs-user/.*$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"name":"A Robot","uname":"robot","subs":[[{SID},{PID},0,0,1700000000,5,0]]}}"#
+        )))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&hunt)
+        .await;
+
+    // The stream says something about our account two seconds in; everything
+    // after that is the accelerator's doing, because the interval is a minute.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/poll/\d+$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(
+                    // `uid` is the account `probe_config` gives this Runner: an event
+            // about somebody else's submission must not wake it.
+            r#"[{"id":2,"type":"lastsubs","msg":{"sid":31254724,"uid":1,"pid":36,"ver":90}}]"#,
+                )
+                .set_delay(Duration::from_secs(2)),
+        )
+        .with_priority(1)
+        .mount(&hunt)
+        .await;
+
+    uhunt(&hunt, 90).await;
+    server_handing_out(
+        &mock,
+        job(
+            r#"{"language":"c89-gcc"}"#,
+            r#"{"languages":[]}"#,
+            r#"{"uva":{"problemNumber":100}}"#,
+        ),
+        // A renewal that works, so that what this test measures is the stream
+        // and not a Runner giving a job back.
+        renewed(),
+    )
+    .await;
+
+    let mut config = probe_config("accelerated", &mock.uri(), &site.uri(), &hunt.uri());
+    config.external.long_poll_enabled = true;
+    config.external.poll_min = 60;
+    config.external.poll_max = 60;
+
+    run_for(config, Duration::from_secs(12)).await;
+
+    let sent = mock.received_requests().await.unwrap();
+    let reports = posted_to(&sent, "/report");
+    assert_eq!(
+        reports.len(),
+        1,
+        "the verdict waited for the interval the accelerator is supposed to replace",
+    );
+    assert!(
+        !reports[0].contains("\"infrastructureFailure\":true"),
+        "the report is not a verdict at all: {}",
+        reports[0]
     );
 }

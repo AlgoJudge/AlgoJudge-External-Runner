@@ -442,9 +442,20 @@ impl<J: Judge> Runner<J> {
                     }
                 }
             } else {
+                // **The wait is the judge's, where it has one.** An integration
+                // with a live channel holds this open and returns the moment it
+                // hears about our account; one without it sleeps, which is what
+                // the interval net was always doing.
                 let until = ask_judge_at.saturating_duration_since(Instant::now());
                 tokio::select! {
-                    _ = tokio::time::sleep(until.min(Duration::from_secs(5))) => {}
+                    told = self.judge.wait_for_a_sign(until) => {
+                        // Asked now rather than at the top of the next
+                        // interval: waking early and then waiting anyway would
+                        // spend the accelerator on nothing.
+                        if told {
+                            ask_judge_at = Instant::now();
+                        }
+                    }
                     _ = stopping.wait() => {}
                 }
             }
@@ -490,9 +501,10 @@ impl<J: Judge> Runner<J> {
 
     /// How long until the judge is asked again.
     ///
-    /// **The long-poll trigger is not built yet**, so the interval is computed as
-    /// if the accelerator were off — which is what makes escalation earn its
-    /// keep. Wiring the trigger later changes this line and nothing else.
+    /// **Flat where the trigger is on**, because the stream is what makes a
+    /// verdict prompt and this is what makes it certain. With it off the
+    /// interval escalates instead, and freshness is traded against being a
+    /// guest on somebody else's infrastructure.
     fn cycle(&self) -> Duration {
         let oldest = self
             .pending
@@ -501,7 +513,7 @@ impl<J: Judge> Runner<J> {
             .max()
             .unwrap_or_default();
         crate::schedule::interval(
-            false,
+            self.config.external.long_poll_enabled,
             oldest,
             Duration::from_secs(self.config.external.poll_min),
             Duration::from_secs(self.config.external.poll_max),
