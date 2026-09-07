@@ -6,18 +6,15 @@
 #   docker compose -f example-development-docker-compose.yaml down -v
 #
 # **This is the stack the README asked for**, and what it is still for is the
-# three tests that need a real Server: `claim_lease`, `lease` and `stack` are
-# `#[ignore]`d and read `AJ_TEST_SERVER`. Everything else runs without it —
-# thirteen tests across `archive`, `loop` and `claim_lease` are not ignored, and
-# `cargo test --workspace` in CI runs all of them against stand-ins.
+# tests that need a real Server: the `#[ignore]`d cases in `claim_lease`, `lease`
+# and `stack`, which read `AJ_TEST_SERVER`. Everything else runs without it, and
+# `cargo test --workspace` in CI runs all of that against stand-ins — `./x test
+# -- --list` says how many rather than a number here going stale.
 #
-# **This said CI ran none of them and that a lease-renewal regression reddened no
-# pull request.** The first half was wrong when it was written on 2026-08-24 and
-# the second stopped being true on 2026-08-31: `tests/loop.rs` drives the whole
-# loop against a Server stand-in whose lease endpoint answers 503, and asserts
-# the job is reported rather than dropped. It builds the Server from a sibling
-# checkout, so it needs
-# `AlgoJudge-Server` beside this repository.
+# **`tests/loop.rs` needs no checkout of anything.** It drives the whole loop
+# against a `wiremock` Server whose lease endpoint answers 503 and asserts the
+# job is reported rather than dropped. What needs `AlgoJudge-Server` beside this
+# repository is the stack below.
 #
 # **Not the production stack.** That belongs in `AlgoJudge-Ops`, where this
 # Runner is a profile of its own. Port 8098 rather than 8080 so this can stand

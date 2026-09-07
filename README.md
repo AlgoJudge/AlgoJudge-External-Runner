@@ -157,9 +157,10 @@ git-ignored and is what `./x` passes to the container as a file rather than on a
 command line, because an argument lands in the shell history and the process
 list.
 
-**Two sections, and the split is the point.** `AJ_Server__*`, `AJ_Runner__*` and
-`AJ_Lease__*` are this Runner's own and mean the same thing whatever it forwards
-to. `AJ_External__*` is the judging system it forwards to:
+**Two sections, and the split is the point.** `AJ_Server__*`, `AJ_Runner__*`,
+`AJ_Lease__*`, `AJ_Cache__*` and `AJ_Poll__*` are this Runner's own and mean the
+same thing whatever it forwards to. `AJ_External__*` is the judging system it
+forwards to:
 
 | Variable | |
 |---|---|
@@ -172,6 +173,15 @@ to. `AJ_External__*` is the judging system it forwards to:
 | `AJ_External__SubmitMinIntervalSeconds` | the gap between two submissions |
 | `AJ_External__PendingTimeoutSeconds` | how long an unanswered submission is waited for |
 | `AJ_External__MaxPending` | how many may be outstanding at once |
+| `AJ_External__LongPollEnabled` | whether the accelerator is on when nothing says otherwise |
+
+The Runner's own, beside the ones every Runner has:
+
+| Variable | |
+|---|---|
+| `AJ_Runner__Name` | what a manager sees in the approval list |
+| `AJ_Poll__WaitSeconds` | how long our own Server may hold a claim open. `0` asks for none |
+| `AJ_Poll__MinSeconds`, `AJ_Poll__MaxSeconds` | the floor and ceiling of the wait between asks of our own Server, after one failed or came back unheld. **Not the `External__Poll*` pair**, which paces somebody else's judge |
 
 An unknown judge is refused at start-up, by name and with the list of what this
 build knows. The addresses default to the default judge's own, so a deployment
@@ -199,9 +209,12 @@ are the refusals an operator meets:
 - **`AJ_Lease__RequestSeconds` must exceed `AJ_External__PendingTimeoutSeconds`.**
   Otherwise the Server reclaims the job while this Runner is still waiting on the
   judge, and the next Runner to claim it submits the same solution again.
-- **`AJ_External__PollMaxSeconds` must fit four times inside the lease.** A held
-  lease is renewed on the polling cycle, so slowing the polling down to be polite
-  to somebody else's service slows the renewing down with it — and a lease that
+- **`AJ_External__PollMaxSeconds` *plus* `AJ_Poll__WaitSeconds` must fit four
+  times inside the lease.** A held lease is renewed once per cycle, and the cycle
+  is both of those: the judge's interval, and the claim the Server may hold. With
+  the defaults that leaves 275 seconds for the judge's interval, not 300 — the
+  refusal names the arithmetic it did. Slowing the polling down to be polite to
+  somebody else's service slows the renewing down with it, and a lease that
   expires between two renewals is the same double submission by another route.
 - **`AJ_Lease__RequestSeconds` may not exceed 3600.** The Server clamps what it
   grants, so a larger request is a deadline of this Runner's own invention: it
@@ -212,6 +225,16 @@ are the refusals an operator meets:
 - **`AJ_External__PollMaxSeconds` may not be below `PollMinSeconds`**, and
   `PollMinSeconds` may not be below twenty. An external judge may publish no rate
   limit at all, so that floor is not lowered.
+- **`AJ_Poll__WaitSeconds` may not exceed 300**, which is the longest a Server
+  will hold a claim. Asking for more is worse than being ignored: this Runner
+  tells a held claim from an immediate answer by how long it took, so one asking
+  for 900 would read the Server's 300 as no wait at all.
+- **`AJ_Server__BaseUrl` must carry `/api/`.** A base without it addresses the
+  site rather than the API, and every call would 404 at run time instead.
+- **`AJ_External__MaxPending` may not be 0**, which would leave a Runner that
+  claims nothing and reports nothing, looking healthy throughout.
+- **A `true`/`false` key must say one of those two words.** Anything else is
+  refused rather than read as false.
 
 ## Running it end to end
 
