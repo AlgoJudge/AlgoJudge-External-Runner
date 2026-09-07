@@ -198,12 +198,35 @@ Publishing the image at all is that decision, and it is not made here.
 - [ ] `git ls-files` lists `.env.example` and no `.env`. A real `.env` in the
       working tree is expected and ignored — do not open it, and do not let it
       into a commit or a log.
-- [ ] Run it end to end at least once against a Server: the development compose,
-      then `AJ_TEST_SERVER=… ./x test -- --include-ignored`. Three test files
-      need it — `claim_lease`, `lease` and `stack` — and `lease` alone takes
-      about three minutes. The last step of the manual path in `README.md`
-      sends a **real** submission to a real service, so it needs the account and
-      whoever owns it.
+- [ ] Run it end to end at least once against a Server, in two passes.
+
+      **The suites first, with no Runner attached to that Server.** Bring the
+      stack up without this service — `up -d --wait postgres server` — and run
+      them one at a time:
+
+      ```sh
+      AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1         ./x test -- --include-ignored --test-threads=1
+      ```
+
+      Both halves of that command are load-bearing, and each was learned the
+      hard way on 2026-09-07. **A Runner in the stack competes for the queue**:
+      `claim_lease` waits for a job in an unbounded loop and waited twenty
+      minutes for one this Runner had taken — which it had been allowed to take,
+      because the test approves every Runner it finds — and `stack` asserts a
+      fresh submission is `queued`, which a long-polling Runner makes `running`
+      within milliseconds. **And `--test-threads=1`**: two of these turn external
+      judging on through `PUT /instance`, and in parallel the second gets a 409
+      from the Server's optimistic concurrency, correctly.
+
+      `lease` alone takes about three minutes, because it waits out real
+      renewal cycles.
+
+      **Then the manual path**, which sends a **real** submission to a real
+      service and needs the account and whoever owns it. Start this service only
+      once the submission you mean to send exists: the queue survives the
+      service being down, so starting it after a run of the suites forwards
+      everything that accumulated. On 2026-09-07 that was eight real
+      submissions where one was intended, and they stay on the account.
 - [ ] **The credential in your own `.env` is not in the commit.** `.env.example`
       gives no value to either secret, and nothing else should.
 - [ ] The documentation still describes this repository: every `.md` here,

@@ -771,6 +771,19 @@ impl<J: Judge> Runner<J> {
             };
             self.attach(&entry, document).await;
             self.send(&entry.job_id, &report).await;
+
+            // **The loop closing is worth a line, because its absence reads as
+            // a stall.** Handing over is logged and resolving was not, so a
+            // healthy Runner and one wedged after submitting look identical in
+            // the log — right up until the pending set ages out. Whoever is
+            // watching should see the answer come back, and how long it took.
+            tracing::info!(
+                job = %entry.job_id,
+                judge = self.judge.name(),
+                sid,
+                waited = ?entry.sent.elapsed(),
+                "answered",
+            );
         }
     }
 
