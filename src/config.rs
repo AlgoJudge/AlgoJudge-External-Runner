@@ -162,6 +162,16 @@ pub struct Config {
     /// failure: on an empty queue the wait *is* the interval.
     pub poll_wait: u64,
 
+    /// The floor and ceiling of the wait between asks of **our own Server**,
+    /// after one has failed or come back empty without being held.
+    ///
+    /// Not to be confused with `External__PollMin/MaxSeconds`, which pace the
+    /// asks of somebody else's judge: that one is somebody else's service and
+    /// is floored far higher. These two are the same two keys, with the same
+    /// names, that the sandboxing Runner reads.
+    pub claim_poll_min: u64,
+    pub claim_poll_max: u64,
+
     pub external: External,
 }
 
@@ -227,6 +237,8 @@ impl Config {
             // learn two. What bounds it is an intermediary rather than this
             // Server; see that Runner's `.env.example` for the table.
             poll_wait: number("Poll__WaitSeconds", 25)?,
+            claim_poll_min: number("Poll__MinSeconds", 1)?,
+            claim_poll_max: number("Poll__MaxSeconds", 30)?,
 
             external: External {
                 judge: var("External__Judge").unwrap_or_else(|_| DEFAULT_JUDGE.into()),
@@ -475,6 +487,8 @@ mod tests {
             cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
             lease_seconds: 1200,
             poll_wait: 25,
+            claim_poll_min: 1,
+            claim_poll_max: 30,
             external: External {
                 judge: DEFAULT_JUDGE.into(),
                 base_url: "https://onlinejudge.org/".into(),

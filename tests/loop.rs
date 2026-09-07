@@ -120,6 +120,25 @@ fn job(props: &str, config: &str, version_props: &str) -> String {
     job_named("job-1", "sub-1", "token-1", props, config, version_props)
 }
 
+/// A job whose source file is the caller's bytes rather than `SOURCE`.
+fn job_with_source(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let sha: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    job(
+        r#"{"language":"c89-gcc"}"#,
+        r#"{"languages":[]}"#,
+        r#"{"uva":{"problemNumber":100}}"#,
+    )
+    .replace(&source_sha256(), &sha)
+    .replace(
+        "\"sizeBytes\":13",
+        &format!("\"sizeBytes\":{}", bytes.len()),
+    )
+}
+
 /// The same, for a Server handing out more than one.
 fn job_named(
     job_id: &str,
@@ -242,6 +261,8 @@ fn probe_config(
         // No wait: these tests drive the loop against a mock and assert on what
         // it did, which a held request would only make slower to read.
         poll_wait: 0,
+        claim_poll_min: 1,
+        claim_poll_max: 30,
         external: algojudge_external_runner::config::External {
             judge: "uva".into(),
             base_url: format!("{site}/"),
@@ -856,5 +877,61 @@ async fn told_to_stop_it_hands_back_every_job_it_is_holding() {
     assert!(
         posted_to(&sent, "/report").is_empty(),
         "a stopped Runner reported on work it did not finish",
+    );
+}
+
+/// **A source that is not text is the participant's file, not our machinery.**
+///
+/// Reading it with `read_to_string` made a file in any other encoding an
+/// infrastructure failure — which is rejudgeable, so every rejudge repeated it
+/// against a file that will never change, for ever. What leaves this
+/// installation is the bytes of a form field, so a file that cannot be decoded
+/// is one the judge could never have been given: a verdict, and a final one.
+#[tokio::test]
+async fn a_source_that_is_not_text_is_a_verdict_and_not_a_failure() {
+    // A lone 0xFF: valid in Latin-1, never valid UTF-8.
+    let bytes: Vec<u8> = vec![0x69, 0x6e, 0x74, 0x20, 0xff, 0x0a];
+
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive(&site).await;
+    uhunt(&hunt, 0).await;
+
+    // Mounted first and at a higher priority than the default below it.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/runner/files/file-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+
+    server_handing_out(&mock, job_with_source(&bytes), ResponseTemplate::new(204)).await;
+
+    run_for(
+        probe_config("not-text", &mock.uri(), &site.uri(), &hunt.uri()),
+        Duration::from_millis(1500),
+    )
+    .await;
+
+    let sent = mock.received_requests().await.unwrap();
+    let reports = posted_to(&sent, "/report");
+    assert_eq!(reports.len(), 1, "the job was not answered at all");
+    assert!(
+        !reports[0].contains("\"infrastructureFailure\":true"),
+        "a file that will never decode was reported as our failure, so a rejudge          repeats it for ever: {}",
+        reports[0]
+    );
+    assert!(
+        reports[0].contains("PolicyViolation"),
+        "the participant is not told what was wrong with their file: {}",
+        reports[0]
+    );
+
+    // Nothing left the installation: the archive was never asked to take it.
+    let tried = site.received_requests().await.unwrap();
+    assert!(
+        tried.iter().all(|r| !r.url.path().contains("submit")),
+        "a file that cannot be decoded was still offered to the archive",
     );
 }
