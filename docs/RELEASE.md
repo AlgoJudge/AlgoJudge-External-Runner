@@ -151,13 +151,30 @@ Publishing the image at all is that decision, and it is not made here.
       nobody chose. It is written in three files here — `Dockerfile`,
       `Dockerfile.toolchain`, `.github/workflows/ci.yml` — and in the same three
       there; all six must match.
+- [ ] **Every image this repository pins has been looked at**, and what is
+      behind is behind for a reason somebody wrote down. Four lines, three
+      distinct images, in four files:
+
+      | | where | how it moves |
+      |---|---|---|
+      | `rust@sha256:…` | `Dockerfile`, `Dockerfile.toolchain`, `ci.yml` | a digest, and the item above governs it |
+      | `gcr.io/distroless/static-debian13:nonroot` | `Dockerfile` | a tag, and **the base of the image this repository publishes** |
+      | `postgres:18` | `example-development-docker-compose.yaml` | a tag, major pinned on purpose — development only |
+
+      ```sh
+      grep -n '^FROM' Dockerfile Dockerfile.toolchain
+      grep -rn 'image:' example-*.yaml .github/workflows/*.yml
+      ```
+
+      **A digest says what it is and never what it is behind**, so this is a
+      question to ask the registry rather than the file. Record the answer and
+      the date whether or not anything moves.
 - [ ] Somebody has looked for advisories against `Cargo.lock`. **Nothing in this
       repository does it**: there is no `cargo audit` or `cargo deny` step in
       either workflow, none in `x`, no `deny.toml` and no Dependabot
       configuration. Until there is, it is a person running
       `./x install cargo-audit` and `./x audit`, and the date of that run is
-      what a release can claim. **No such run backs the 0.1.0 preparation**: the
-      locked versions were read on 2026-09-07 and checked against nothing.
+      what a release can claim.
       `scraper` is the one direct dependency whose requested range sits a full
       minor behind what exists upstream — `0.20`, against `0.22`.
 - [ ] `.env.example` has been **read**, not just tested. The suite compares it
