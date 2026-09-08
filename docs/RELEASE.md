@@ -227,6 +227,17 @@ Publishing the image at all is that decision, and it is not made here.
       service being down, so starting it after a run of the suites forwards
       everything that accumulated. On 2026-09-07 that was eight real
       submissions where one was intended, and they stay on the account.
+
+      Two things a reset stack needs and a running one does not.
+      **`docker compose up -d` rather than `start`**: after `down -v` there is
+      no container to start, and `start` says so in a way that is easy to read
+      as success. **And the Runner needs approving again** — `down -v` takes the
+      identity volume with it, so it registers under a new key and waits. The
+      suites approve every Runner they find; nobody approves this one.
+
+      What a fresh development database is not, is empty: the Server seeds one,
+      and four of its jobs sit queued. They are `standard-io@1`, so this Runner
+      never touches them.
 - [ ] **The credential in your own `.env` is not in the commit.** `.env.example`
       gives no value to either secret, and nothing else should.
 - [ ] The documentation still describes this repository: every `.md` here,
