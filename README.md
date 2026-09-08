@@ -78,20 +78,6 @@ next sends the same solution again. That is what a restart has always cost; what
 a polite stop saves is the lease each of those jobs would otherwise have sat
 out.
 
-**The stop has a budget.** Each held job is one call to the Server, and the calls
-are made one after another, so giving everything back takes the number of jobs
-times the time one call costs. `AlgoJudge-Ops` allows sixty seconds for the whole
-of it — `EXTERNAL_RUNNER_STOP_GRACE` — and whatever is not given back by then is
-killed with the process and sits out its lease instead, twenty minutes by
-default, before the Server reclaims it.
-
-Measured against a Server on the same host, 2026-09-08: about 750 ms before the
-first release, then **12 ms per job**. At the ceiling of 100 that is under two
-seconds inside a sixty-second grace. The margin is the point rather than the
-number: sixty seconds over 100 jobs allows 600 ms a call, so an installation
-whose Server is remote, busy, or behind a proxy should raise the grace rather
-than assume our figure is theirs.
-
 **`external: true` is not a detail.** The Server pairs a problem with a Runner on
 that flag and the problem's own, by equality — so a Runner that forwards and does
 not say so is handed nothing at all, and from a log that is indistinguishable

@@ -232,10 +232,9 @@ pub struct Runner<J: Judge> {
     pub cache: Arc<Cache>,
     pub judge: J,
     pub config: Config,
-    /// **Shared by the three waits below, and never locked across an await:**
-    /// read what is needed, let go, make the request, take it again to write.
-    /// `std::sync::Mutex` and not the async one, so that holding it over an
-    /// await is a compile error rather than a stall nobody notices.
+    /// Shared by the three waits, and never locked across an await.
+    /// `std::sync::Mutex` and not the async one, so holding it over an await is
+    /// a compile error rather than a stall nobody notices.
     pending: Mutex<Pending>,
     /// Raised when a submission joins the set, so the two tasks that have work
     /// only while something is outstanding sleep instead of asking.
@@ -276,26 +275,20 @@ impl<J: Judge> Runner<J> {
 
     /// Runs until it is told to stop, and hands back what it was holding.
     ///
-    /// **Three waits, concurrent and not in turn.** Asking the Server for work
-    /// may be held open for `AJ_Poll__WaitSeconds`, so a task that waited there
+    /// Three waits, concurrent rather than in turn: asking the Server for work
+    /// may be held open for `AJ_Poll__WaitSeconds`, and a task that waited there
     /// before listening to the judge was deaf for that long with a submission
-    /// already at the archive. Keep them independent.
+    /// already at the archive.
     ///
-    /// `try_join!` rather than `spawn`: all three wait on sockets, so what is
-    /// wanted is concurrency and not parallelism, and nothing has to be
-    /// `'static` or cloned into a task.
-    ///
-    /// **Every job, not one.** This Runner holds a pool of up to
-    /// `AJ_External__MaxPending`, and a lease left to expire costs each of
-    /// those participants the whole of it.
+    /// `try_join!` rather than `spawn`: all three wait on sockets, so nothing
+    /// needs to be `'static` or cloned into a task.
     pub async fn work(&self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
         // Kept, so the report retry four calls down hears it too.
         let _ = self.stopping.set(stopping.clone());
 
-        // **Liveness on a timer of its own**, because none of the three waits
-        // below is bounded by anything that would make a good heartbeat: the
-        // Server calls a Runner disconnected after a hundred and twenty seconds
-        // and a cycle of somebody else's archive can outlast that.
+        // On a timer of its own: none of the three waits below is bounded
+        // tightly enough to serve as one, and the Server calls a Runner
+        // disconnected after two minutes.
         let beating = heartbeat(Arc::clone(&self.server), stopping.clone());
 
         let outcome = tokio::try_join!(
@@ -325,8 +318,8 @@ impl<J: Judge> Runner<J> {
                 return Ok(());
             }
 
-            // **Full is a wait, not a spin.** Rarely reached: what protects the
-            // archive is the gap between submissions, not this ceiling.
+            // Full: wait rather than spin. What protects the archive is the
+            // gap between submissions, not this ceiling.
             if self.outstanding() >= self.config.external.max_pending {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -335,8 +328,8 @@ impl<J: Judge> Runner<J> {
                 continue;
             }
 
-            // Whether the Server held the last claim open, which decides
-            // whether this task backs off before asking again.
+            // Whether the Server held the claim open, which decides whether to
+            // back off before asking again.
             let mut held = false;
 
             if !stopping.now() && self.outstanding() < self.config.external.max_pending {
@@ -379,10 +372,8 @@ impl<J: Judge> Runner<J> {
                             // attempt.
                             gave_back(&server, &job).await;
                         }
-                        // **Not `give_everything_back` here.** The other tasks
-                        // are still running under the same join, and releasing
-                        // what one of them is holding an answer for discards
-                        // the answer. `work` does it once, after the join.
+                        // Not here: another task may be holding an answer for
+                        // one of these. `work` releases once, after the join.
                         return Ok(());
                     }
                 };
@@ -466,11 +457,10 @@ impl<J: Judge> Runner<J> {
 
     /// Asks the judge about everything outstanding, and reports what came back.
     ///
-    /// **Two deadlines, and the channel may hurry only one.** A sign pulls
-    /// collecting to now, which is what the channel is for. Renewal keeps the
-    /// interval's cadence: `lease::ceiling` counts renewal cycles against
-    /// `AJ_External__PollMaxSeconds`, so renewing on every event would spend
-    /// that budget in seconds and give a job up with the lease still valid.
+    /// Two deadlines. A sign from the channel pulls collecting forward;
+    /// renewal keeps the interval's cadence, because `lease::ceiling` counts
+    /// renewal cycles against `AJ_External__PollMaxSeconds` and renewing on
+    /// every event would spend that budget in seconds.
     ///
     /// Both start due, so the first pass after a submission acts at once.
     async fn collecting(&self, stopping: &Stopping) -> anyhow::Result<()> {
@@ -482,9 +472,8 @@ impl<J: Judge> Runner<J> {
                 return Ok(());
             }
 
-            // **Registered before the count is read.** `notify_waiters` stores
-            // nothing for a task that is not yet waiting, so a submission
-            // landing in between would leave this one asleep with work to do.
+            // Registered before the count is read: `notify_waiters` stores
+            // nothing for a task that is not yet waiting.
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
@@ -497,9 +486,8 @@ impl<J: Judge> Runner<J> {
                 continue;
             }
 
-            // **Registered before the work below, not at the select.** A sign
-            // raised while this task is renewing or harvesting would otherwise
-            // be dropped, and the verdict would wait out the whole interval.
+            // Registered before the work below, not at the select: a sign
+            // raised while this task is renewing or harvesting would be lost.
             let sign = self.sign.notified();
             tokio::pin!(sign);
             sign.as_mut().enable();
@@ -515,8 +503,8 @@ impl<J: Judge> Runner<J> {
                 collect_at = Instant::now() + self.cycle();
             }
 
-            // **After both**, because renewal drops entries as well: a set
-            // emptied by a lost lease would otherwise leave the channel open.
+            // After both: renewal drops entries too, so the set can empty
+            // without the collect branch running.
             if self.outstanding() == 0 {
                 self.settled.notify_waiters();
             }
@@ -540,18 +528,17 @@ impl<J: Judge> Runner<J> {
 
     /// Holds the judge's live channel open, and says when it fires.
     ///
-    /// **Its own task, because this wait must not queue behind another.** It
-    /// reports rather than collects: the channel is lossy, and a verdict read
-    /// from it could be a verdict missed, so it only ever says *ask now*.
+    /// Its own task, so this wait does not queue behind another. It only ever
+    /// says *ask now*: the channel is lossy, so a verdict read from it is one
+    /// that can be missed.
     async fn listening(&self, stopping: &Stopping) -> anyhow::Result<()> {
         loop {
             if stopping.now() {
                 return Ok(());
             }
 
-            // **Registered before the count is read.** `notify_waiters` stores
-            // nothing for a task that is not yet waiting, so a submission
-            // landing in between would leave this one asleep with work to do.
+            // Registered before the count is read: `notify_waiters` stores
+            // nothing for a task that is not yet waiting.
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
@@ -564,7 +551,7 @@ impl<J: Judge> Runner<J> {
                 continue;
             }
 
-            // **Registered before the wait, for the reason `arrived` is.**
+            // Registered early, for the reason `arrived` is.
             let settled = self.settled.notified();
             tokio::pin!(settled);
             settled.as_mut().enable();
