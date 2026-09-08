@@ -10,8 +10,10 @@
 //! through `crate::integration::Judge`, so adding a second judging system is a
 //! module beside `crate::uva` rather than a change to this file.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+use tokio::sync::Notify;
 
 use aj_protocol::stopping::Stopping;
 use aj_protocol::wire::{AttachToJob, ClaimedJob, Register, ReportResult};
@@ -227,7 +229,24 @@ pub struct Runner<J: Judge> {
     pub cache: Arc<Cache>,
     pub judge: J,
     pub config: Config,
-    pending: Pending,
+    /// **Behind a lock, because four concurrent waits share it.** The lock is
+    /// never held across an await: every one of them reads what it needs, lets
+    /// go, makes its request, and takes it again to write. Holding it over a
+    /// request would put the archive's latency inside every other task.
+    pending: Mutex<Pending>,
+    /// Raised when a submission joins the set.
+    ///
+    /// **So the two tasks that only have work while something is outstanding
+    /// sleep rather than ask.** Without it, collecting and listening would each
+    /// wake on their own interval to find nothing, against somebody else's
+    /// service.
+    arrived: Notify,
+    /// Raised when the judge's live channel says something about our account.
+    ///
+    /// One task hears the channel and another asks the archive; this is the
+    /// whole of what passes between them, because a stream that can drop events
+    /// may say *ask now* and must never say *here is the verdict*.
+    sign: Notify,
 
     /// **Held rather than passed**, because the waits that have to hear it are
     /// not all in `work`: the report retry is four calls down, and threading a
@@ -235,7 +254,7 @@ pub struct Runner<J: Judge> {
     /// the argument everywhere except where it is read.
     ///
     /// Set when `work` starts. Before that there is nothing to stop.
-    stopping: Stopping,
+    stopping: OnceLock<Stopping>,
 }
 
 impl<J: Judge> Runner<J> {
@@ -245,31 +264,43 @@ impl<J: Judge> Runner<J> {
             cache,
             judge,
             config,
-            pending: Pending::default(),
+            pending: Mutex::new(Pending::default()),
+            arrived: Notify::new(),
+            sign: Notify::new(),
             // Replaced by `work`'s own handle. A Runner that has not started
             // has nothing to hand back, so this one is never waited on.
-            stopping: Stopping::told().0,
+            stopping: OnceLock::new(),
         }
     }
 
     /// Runs until it is told to stop, and hands back what it was holding.
     ///
+    /// **Four waits, and they used to take turns.** One loop asked the Server
+    /// for work, then asked the judge about what was outstanding, then listened
+    /// to the judge's live stream — in that order, each blocking the next. The
+    /// first of those can be held open by the Server for the whole of
+    /// `AJ_Poll__WaitSeconds`, so a Runner with a submission at the archive
+    /// spent that time deaf: the verdict arrived in the stream and nobody was
+    /// listening. Measured 2026-09-08 against onlinejudge.org, which judged in
+    /// **2.1 to 3.1 seconds** while this Runner reported after **24 to 25** —
+    /// and the difference was the held claim, not the archive.
+    ///
+    /// So they run concurrently. `try_join!` rather than `spawn`, deliberately:
+    /// every one of them is waiting on a socket, so what is needed is
+    /// concurrency and not parallelism — and this way nothing has to be `'static`,
+    /// nothing is cloned into a task, and a failure in any of them ends the
+    /// others by returning.
+    ///
     /// **Every job, not one.** The sandboxing Runner holds a single submission
     /// and gives that one back; this Runner holds a pool of up to
     /// `AJ_External__MaxPending`, and a lease left to expire costs each of those
     /// participants the whole of it.
-    pub async fn work(&mut self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
+    pub async fn work(&self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
         // Kept, so the report retry four calls down hears it too.
-        self.stopping = stopping.clone();
-
-        let mut claiming = Backoff::new(
-            Duration::from_secs(self.config.claim_poll_min),
-            Duration::from_secs(self.config.claim_poll_max),
-        );
-        let mut ask_judge_at = Instant::now();
+        let _ = self.stopping.set(stopping.clone());
 
         // **Liveness on a timer of its own.** It used to be a threshold checked
-        // at the bottom of this loop, which was fine while an iteration was a
+        // at the bottom of the loop, which was fine while an iteration was a
         // second or two. A held claim made the iteration tens of seconds, so a
         // sixty-second threshold fired every second pass — an effective beat of
         // about a hundred and ten seconds against a Server that calls a Runner
@@ -280,32 +311,54 @@ impl<J: Judge> Runner<J> {
         // not a moment it should have to remember to say it is alive in.
         let beating = heartbeat(Arc::clone(&self.server), stopping.clone());
 
+        let outcome = tokio::try_join!(
+            self.intake(identity, stopping),
+            self.collecting(stopping),
+            self.listening(stopping),
+        );
+
+        beating.abort();
+        self.give_everything_back().await;
+        outcome.map(|_| ())
+    }
+
+    /// Asks the Server for work and forwards it to the judge.
+    ///
+    /// **The only task that submits**, so the archive's one-at-a-time rule and
+    /// the interval between submissions are this task's alone to keep — and
+    /// `Site::submit` keeps them under its own lock either way.
+    async fn intake(&self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
+        let mut claiming = Backoff::new(
+            Duration::from_secs(self.config.claim_poll_min),
+            Duration::from_secs(self.config.claim_poll_max),
+        );
+
         loop {
-            // **Checked first, so a stop is acted on before another cycle of
-            // somebody else's archive.** Asking the judge is the slowest thing
-            // this loop does, and the jobs it would ask about are the ones being
-            // given back.
             if stopping.now() {
-                beating.abort();
-                self.give_everything_back().await;
                 return Ok(());
             }
 
-            if !self.pending.is_empty() && Instant::now() >= ask_judge_at {
-                self.renew_everything().await;
-                self.harvest().await;
-                self.expire().await;
-                ask_judge_at = Instant::now() + self.cycle();
+            // **Full is a wait, not a spin.** The ceiling is a politeness to the
+            // archive about how much of its queue one installation occupies; the
+            // rate at which submissions arrive there is `SubmitMinIntervalSeconds`
+            // and is enforced elsewhere, so this is rarely reached.
+            if self.outstanding() >= self.config.external.max_pending {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
+                continue;
             }
+
+            // Whether the Server held the last claim open, which decides
+            // whether this task backs off before asking again.
+            let mut held = false;
 
             // **And not while stopping**, which the top of the loop cannot
             // decide on its own: asking the judge about the pending set happens
             // in between, and it is the slowest call this Runner makes.
-            // Whether the Server held the last claim open, which decides
-            // whether there is anything left to wait for below.
-            let mut held = false;
 
-            if !stopping.now() && self.pending.len() < self.config.external.max_pending {
+            if !stopping.now() && self.outstanding() < self.config.external.max_pending {
                 let wait =
                     (self.config.poll_wait > 0).then(|| Duration::from_secs(self.config.poll_wait));
                 let asked = Instant::now();
@@ -345,7 +398,6 @@ impl<J: Judge> Runner<J> {
                             // attempt.
                             gave_back(&server, &job).await;
                         }
-                        beating.abort();
                         self.give_everything_back().await;
                         return Ok(());
                     }
@@ -374,7 +426,6 @@ impl<J: Judge> Runner<J> {
                         // trip and nothing else.
                         if stopping.now() {
                             gave_back(&server, &job).await;
-                            beating.abort();
                             self.give_everything_back().await;
                             return Ok(());
                         }
@@ -392,13 +443,8 @@ impl<J: Judge> Runner<J> {
                     }
                     Err(e) if e.needs_handshake() => {
                         self.server.forget_token();
-                        if let Err(e) =
-                            admitted(&self.server, identity, &self.config, &self.judge, stopping)
-                                .await
-                        {
-                            beating.abort();
-                            return Err(e);
-                        }
+                        admitted(&self.server, identity, &self.config, &self.judge, stopping)
+                            .await?;
                         continue;
                     }
                     // **Up and declining to serve is not the same as broken.**
@@ -406,63 +452,152 @@ impl<J: Judge> Runner<J> {
                     // reason, and the wait is the longer of ours and theirs.
                     Err(e) if e.unavailable() || e.in_maintenance() => {
                         if !wait_out(&self.server, &e, &mut claiming, stopping).await {
-                            beating.abort();
                             return Ok(());
                         }
                     }
                     // The key is finished; no wait revives it, and carrying on
                     // would be a loop asking to be refused.
                     Err(e) if e.revoked() => {
-                        beating.abort();
                         return Err(anyhow::anyhow!(
-                            "this Runner's key has been revoked; it needs a new key and a new registration, which no retry can do: {e}"
-                        ));
+                        "this Runner's key has been revoked; it needs a new key and a new registration, which no retry can do: {e}"
+                    ));
                     }
                     Err(e) => tracing::warn!(%e, "could not ask for work"),
                 }
             }
 
-            // Nothing outstanding: sleep as the ordinary Runner does. Something
-            // outstanding: wake in time for the judge, and no later.
-            //
-            // **Both waits are cut short by the word.** The backoff reaches
-            // thirty seconds and the judge's interval reaches five, and a Runner
-            // that sat out either of them before releasing would be holding
-            // leases for no reason at all.
-            if self.pending.is_empty() {
-                // **No backoff after a claim the Server held.** The wait *was*
-                // the interval; sleeping again would leave this Runner deaf for
-                // the thirty seconds the backoff has climbed to, and a
-                // submission arriving in that window waits it out — the old
-                // latency, on the new machinery.
-                if !held {
-                    tokio::select! {
-                        _ = claiming.wait() => {}
-                        _ = stopping.wait() => {}
-                    }
-                }
-            } else {
-                // **The wait is the judge's, where it has one.** An integration
-                // with a live channel holds this open and returns the moment it
-                // hears about our account; one without it sleeps, which is what
-                // the interval net was always doing.
-                let until = ask_judge_at.saturating_duration_since(Instant::now());
+            // **No backoff after a claim the Server held.** The wait *was* the
+            // interval; sleeping again would leave this task deaf for the thirty
+            // seconds the backoff has climbed to, and work arriving in that window
+            // would sit through it. Told apart by how long the answer took, in the
+            // `Ok(None)` arm above, because a Server that does not know about
+            // `waitSeconds` and one that is draining both answer at once.
+            if !held {
                 tokio::select! {
-                    told = self.judge.wait_for_a_sign(until) => {
-                        // Asked now rather than at the top of the next
-                        // interval: waking early and then waiting anyway would
-                        // spend the accelerator on nothing.
-                        if told {
-                            ask_judge_at = Instant::now();
-                        }
-                    }
-                    _ = stopping.wait() => {}
+                    _ = claiming.wait() => {}
+                    _ = stopping.wait() => return Ok(()),
                 }
             }
         }
     }
 
-    /// Hands back everything this Runner is waiting on, because it is stopping.
+    /// Asks the judge about everything outstanding, and reports what came back.
+    ///
+    /// **Two deadlines, and only one of them the stream may hurry.** Collecting
+    /// is what the live channel exists to bring forward, so a sign pulls it to
+    /// now. Renewal keeps the interval's own cadence whatever the channel says:
+    /// `lease::ceiling` counts renewal cycles against
+    /// `AJ_External__PollMaxSeconds` to decide when the Server has been
+    /// unreachable for too long, so renewing every time an event arrived would
+    /// spend that whole budget in seconds and give a job up while its lease
+    /// still had twenty minutes left.
+    ///
+    /// Both start due, so the first pass after a submission does what the
+    /// single loop did at the top of its first turn.
+    async fn collecting(&self, stopping: &Stopping) -> anyhow::Result<()> {
+        let mut collect_at = Instant::now();
+        let mut renew_at = Instant::now();
+
+        loop {
+            if stopping.now() {
+                return Ok(());
+            }
+
+            // **Interest registered before the count is read**, because
+            // `notify_waiters` wakes whoever is already waiting and stores
+            // nothing for whoever is not. A submission landing between the
+            // read and the await would otherwise leave this task asleep with
+            // work outstanding, and nothing would wake it until the next one.
+            let arrived = self.arrived.notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+
+            if self.outstanding() == 0 {
+                tokio::select! {
+                    _ = arrived => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
+                continue;
+            }
+
+            let now = Instant::now();
+            if now >= renew_at {
+                self.renew_everything().await;
+                renew_at = Instant::now() + self.cycle();
+            }
+            if now >= collect_at {
+                self.harvest().await;
+                self.expire().await;
+                collect_at = Instant::now() + self.cycle();
+            }
+
+            if stopping.now() {
+                return Ok(());
+            }
+
+            let until = collect_at.saturating_duration_since(Instant::now());
+            tokio::select! {
+                _ = tokio::time::sleep(until) => {}
+                // Asked now rather than at the top of the next interval: waking
+                // early and then waiting anyway would spend the accelerator on
+                // nothing.
+                _ = self.sign.notified() => collect_at = Instant::now(),
+                _ = stopping.wait() => return Ok(()),
+            }
+        }
+    }
+
+    /// Holds the judge's live channel open, and says when it fires.
+    ///
+    /// **A task of its own, because it is a wait that must not queue behind
+    /// another.** It reports rather than collects: what a stream delivers may be
+    /// lossy, and a missed event would be a submission that hangs until it times
+    /// out. So this only ever says *ask now*.
+    async fn listening(&self, stopping: &Stopping) -> anyhow::Result<()> {
+        loop {
+            if stopping.now() {
+                return Ok(());
+            }
+
+            // **Interest registered before the count is read**, because
+            // `notify_waiters` wakes whoever is already waiting and stores
+            // nothing for whoever is not. A submission landing between the
+            // read and the await would otherwise leave this task asleep with
+            // work outstanding, and nothing would wake it until the next one.
+            let arrived = self.arrived.notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+
+            if self.outstanding() == 0 {
+                tokio::select! {
+                    _ = arrived => {}
+                    _ = stopping.wait() => return Ok(()),
+                }
+                continue;
+            }
+
+            let told = tokio::select! {
+                told = self.judge.wait_for_a_sign(Duration::from_secs(self.config.external.poll_max)) => told,
+                _ = stopping.wait() => return Ok(()),
+            };
+            if told {
+                self.sign.notify_waiters();
+            }
+        }
+    }
+
+    /// The stop handle, which `work` sets before anything can reach this.
+    fn stop(&self) -> &Stopping {
+        self.stopping
+            .get()
+            .expect("work sets the stop handle before any of this can run")
+    }
+
+    /// How many submissions the judge still owes an answer for.
+    fn outstanding(&self) -> usize {
+        self.pending.lock().expect("the pending lock").len()
+    }
+
     ///
     /// **A systemic act, not a processing error.** Nothing went wrong with any
     /// of these submissions; the platform is taking their Runner away. So the
@@ -474,9 +609,11 @@ impl<J: Judge> Runner<J> {
     /// any kind already leaves the answer that is still coming with nowhere to
     /// land, and the job is already re-forwarded by whoever claims it next.
     /// What changes is when — now, rather than when the lease expires.
-    async fn give_everything_back(&mut self) {
+    async fn give_everything_back(&self) {
         let held: Vec<(i64, String, String)> = self
             .pending
+            .lock()
+            .expect("the pending lock")
             .iter()
             .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
             .collect();
@@ -495,7 +632,7 @@ impl<J: Judge> Runner<J> {
                     "could not give the job back; it returns when the lease expires",
                 ),
             }
-            self.pending.take(sid);
+            self.pending.lock().expect("the pending lock").take(sid);
         }
     }
 
@@ -508,6 +645,8 @@ impl<J: Judge> Runner<J> {
     fn cycle(&self) -> Duration {
         let oldest = self
             .pending
+            .lock()
+            .expect("the pending lock")
             .iter()
             .map(|(_, entry)| entry.sent.elapsed())
             .max()
@@ -522,7 +661,7 @@ impl<J: Judge> Runner<J> {
     }
 
     /// Everything that has to happen between claiming a job and waiting for it.
-    async fn take(&mut self, job: ClaimedJob) {
+    async fn take(&self, job: ClaimedJob) {
         let token = job.lease_token.clone();
 
         // **A language the assignment excluded is a verdict, not a failure**,
@@ -563,7 +702,13 @@ impl<J: Judge> Runner<J> {
                     sid = entry.0,
                     "handed over",
                 );
-                self.pending.insert(entry.0, entry.1);
+                self.pending
+                    .lock()
+                    .expect("the pending lock")
+                    .insert(entry.0, entry.1);
+                // The two tasks that only have work while something is
+                // outstanding are asleep until this.
+                self.arrived.notify_waiters();
             }
             Err(Blocked::Verdict(refusal)) => {
                 tracing::info!(job = %job.job_id, %refusal, "cannot be handed over as it stands");
@@ -624,7 +769,7 @@ impl<J: Judge> Runner<J> {
     }
 
     async fn forward(
-        &mut self,
+        &self,
         job: &ClaimedJob,
         setup: Setup,
         language: i64,
@@ -633,7 +778,7 @@ impl<J: Judge> Runner<J> {
         // Nothing is outstanding, so nothing can be lost by moving the
         // position — and the position goes stale while this Runner is idle,
         // because it stops listening when it has nothing to wait for.
-        if self.pending.is_empty() {
+        if self.outstanding() == 0 {
             self.judge.note_where_the_channel_is().await;
         }
 
@@ -709,8 +854,13 @@ impl<J: Judge> Runner<J> {
     }
 
     /// One request, however many submissions are outstanding.
-    async fn harvest(&mut self) {
-        let outstanding: Vec<i64> = self.pending.sids().collect();
+    async fn harvest(&self) {
+        let outstanding: Vec<i64> = self
+            .pending
+            .lock()
+            .expect("the pending lock")
+            .sids()
+            .collect();
         if outstanding.is_empty() {
             return;
         }
@@ -726,7 +876,12 @@ impl<J: Judge> Runner<J> {
         let mut done: Vec<(i64, Option<serde_json::Value>, ReportResult)> = Vec::new();
         for answer in &answers {
             let id = self.judge.id_of(answer);
-            let entry = match self.pending.matched(id, self.judge.problem_of(answer)) {
+            let entry = match self
+                .pending
+                .lock()
+                .expect("the pending lock")
+                .matched(id, self.judge.problem_of(answer))
+            {
                 Matched::Stranger => continue,
                 Matched::Disagrees { expected, found } => {
                     tracing::error!(
@@ -741,7 +896,7 @@ impl<J: Judge> Runner<J> {
                 Matched::Ours(entry) => entry.clone(),
             };
 
-            if let Some(held) = self.pending.get_mut(id) {
+            if let Some(held) = self.pending.lock().expect("the pending lock").get_mut(id) {
                 held.trail.push(self.judge.evidence(answer));
             }
 
@@ -786,7 +941,7 @@ impl<J: Judge> Runner<J> {
         }
 
         for (sid, document, report) in done {
-            let Some(entry) = self.pending.take(sid) else {
+            let Some(entry) = self.pending.lock().expect("the pending lock").take(sid) else {
                 continue;
             };
             self.attach(&entry, document).await;
@@ -808,10 +963,17 @@ impl<J: Judge> Runner<J> {
     }
 
     /// The judge did not answer in time.
-    async fn expire(&mut self) {
+    async fn expire(&self) {
         let timeout = Duration::from_secs(self.config.external.pending_timeout);
-        for sid in self.pending.timed_out(timeout, Instant::now()) {
-            let Some(entry) = self.pending.take(sid) else {
+        // **Collected before the loop, so the lock is not held through it.**
+        // The body reports to the Server, and a guard alive across that await
+        // would stop every other task for the length of two HTTP calls each.
+        let expired = {
+            let pending = self.pending.lock().expect("the pending lock");
+            pending.timed_out(timeout, Instant::now())
+        };
+        for sid in expired {
+            let Some(entry) = self.pending.lock().expect("the pending lock").take(sid) else {
                 continue;
             };
             let why = format!(
@@ -826,9 +988,11 @@ impl<J: Judge> Runner<J> {
     }
 
     /// Renewed unconditionally, because renewal never shortens a lease.
-    async fn renew_everything(&mut self) {
+    async fn renew_everything(&self) {
         let held: Vec<(i64, String, String)> = self
             .pending
+            .lock()
+            .expect("the pending lock")
             .iter()
             .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
             .collect();
@@ -851,13 +1015,15 @@ impl<J: Judge> Runner<J> {
             };
             let consecutive = self
                 .pending
+                .lock()
+                .expect("the pending lock")
                 .renewal(sid, !matches!(standing, Standing::Unreachable));
 
             match lease::act(standing, consecutive, ceiling) {
                 Action::KeepWaiting => {}
                 Action::DropSilently => {
                     tracing::warn!(job = %job_id, "the lease is gone; another Runner has this job");
-                    self.pending.take(sid);
+                    self.pending.lock().expect("the pending lock").take(sid);
                 }
                 Action::GiveUp => giving_up.push((sid, consecutive)),
             }
@@ -872,7 +1038,7 @@ impl<J: Judge> Runner<J> {
         // chance of landing. It is not worth paying **before** the jobs that are
         // still fine have been renewed.
         for (sid, consecutive) in giving_up {
-            let Some(entry) = self.pending.take(sid) else {
+            let Some(entry) = self.pending.lock().expect("the pending lock").take(sid) else {
                 continue;
             };
             tracing::error!(
@@ -996,7 +1162,7 @@ impl<J: Judge> Runner<J> {
                     tracing::warn!(%e, job = %job_id, "the report did not land");
                     tokio::select! {
                         _ = backoff.wait() => {}
-                        _ = self.stopping.wait() => {
+                        _ = self.stop().wait() => {
                             tracing::warn!(
                                 job = %job_id,
                                 "told to stop while carrying an answer; the lease will requeue the job",

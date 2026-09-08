@@ -280,7 +280,7 @@ pub trait Judge: Send + Sync {
     /// it is a **trigger and never a source of verdicts**: what it delivers may
     /// be lossy, and a missed verdict is a submission that hangs until it times
     /// out, which is a correctness failure rather than a slow one.
-    fn wait_for_a_sign(&mut self, within: Duration) -> impl Future<Output = bool> + Send {
+    fn wait_for_a_sign(&self, within: Duration) -> impl Future<Output = bool> + Send {
         async move {
             tokio::time::sleep(within).await;
             false
@@ -291,10 +291,8 @@ pub trait Judge: Send + Sync {
     ///
     /// Cached by the implementation: it is somebody else's key, ours to
     /// re-derive rather than to depend on.
-    fn problem(
-        &mut self,
-        number: i64,
-    ) -> impl std::future::Future<Output = anyhow::Result<i64>> + Send;
+    fn problem(&self, number: i64)
+        -> impl std::future::Future<Output = anyhow::Result<i64>> + Send;
 
     /// Hands one submission over and returns the judge's id for it.
     fn submit(
@@ -311,7 +309,7 @@ pub trait Judge: Send + Sync {
     /// that we did not send comes back too and is dropped by the caller: an
     /// account may be shared, and an answer we did not ask for is not an error.
     fn answers(
-        &mut self,
+        &self,
         outstanding: &[i64],
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<Self::Answer>>> + Send;
 

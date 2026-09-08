@@ -265,7 +265,7 @@ impl Config {
                 poll_escalate_after: number("External__PollEscalateAfterSeconds", 120)?,
                 submit_min_interval: number("External__SubmitMinIntervalSeconds", 5)?,
                 pending_timeout: number("External__PendingTimeoutSeconds", 900)?,
-                max_pending: number("External__MaxPending", 20)? as usize,
+                max_pending: number("External__MaxPending", 200)? as usize,
                 long_poll_enabled: flag("External__LongPollEnabled", DEFAULT_LONG_POLL_ENABLED)?,
             },
         };

@@ -393,7 +393,7 @@ async fn run_for(config: algojudge_external_runner::config::Config, how_long: Du
         identity.fingerprint(),
     ));
     let judge = judge(&config);
-    let mut runner =
+    let runner =
         algojudge_external_runner::run::Runner::new(Arc::new(server), cache, judge, config);
 
     let (stopping, _teller) = aj_protocol::stopping::Stopping::told();
@@ -421,7 +421,7 @@ async fn run_until_stopped(
         identity.fingerprint(),
     ));
     let judge = judge(&config);
-    let mut runner =
+    let runner =
         algojudge_external_runner::run::Runner::new(Arc::new(server), cache, judge, config);
 
     let (stopping, teller) = aj_protocol::stopping::Stopping::told();
@@ -534,7 +534,7 @@ async fn a_job_arriving_as_the_stop_lands_is_given_back_and_never_forwarded() {
         identity.fingerprint(),
     ));
     let judge = judge(&config);
-    let mut runner =
+    let runner =
         algojudge_external_runner::run::Runner::new(Arc::new(server), cache, judge, config);
 
     let (stopping, teller) = aj_protocol::stopping::Stopping::told();
