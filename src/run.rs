@@ -332,112 +332,109 @@ impl<J: Judge> Runner<J> {
             // back off before asking again.
             let mut held = false;
 
-            if !stopping.now() && self.outstanding() < self.config.external.max_pending {
-                let wait =
-                    (self.config.poll_wait > 0).then(|| Duration::from_secs(self.config.poll_wait));
-                let asked = Instant::now();
-                // **Raced against the stop, which it was not until 2026-09-04.**
-                // The check above happens before a call the Server may hold open
-                // for the whole of `poll_wait`, so a stop arriving during the
-                // hold cancelled nothing: the process sat there uninterruptible
-                // while its grace ran out, and everything it had already
-                // forwarded to the judge stayed leased for the full lease
-                // instead of being handed back.
-                //
-                // Settled rather than dropped when the stop wins, for the reason
-                // the sandboxing Runner gives at its own claim: the Server
-                // commits a handout before writing the answer to it, so a
-                // dropped request is sometimes a job this Runner owns and cannot
-                // release, never having learned the lease token. Two seconds is
-                // a response in flight; it is not a poll.
-                // Cloned so the future in flight borrows this handle rather
-                // than `self` — the stopping arm below hands work back, and
-                // that needs the Runner itself.
-                let server = Arc::clone(&self.server);
-                let mut claim = std::pin::pin!(server.claim(Some(self.config.lease_seconds), wait));
-                let claimed = tokio::select! {
-                    // An answer already in hand beats a stop that arrived with
-                    // it, rather than a coin flip that throws the job away.
-                    biased;
-                    claimed = &mut claim => claimed,
-                    _ = stopping.wait() => {
-                        if let Ok(Ok(Some(job))) =
-                            tokio::time::timeout(SETTLE, &mut claim).await
-                        {
-                            // **Released, never forwarded.** Taking it would put
-                            // a real submission on the judge's account that this
-                            // installation is about to abandon, and then hand
-                            // the job back for the next Runner to forward again
-                            // — two submissions on somebody else's site for one
-                            // attempt.
-                            gave_back(&server, &job).await;
-                        }
-                        // Not here: another task may be holding an answer for
-                        // one of these. `work` releases once, after the join.
+            let wait =
+                (self.config.poll_wait > 0).then(|| Duration::from_secs(self.config.poll_wait));
+            let asked = Instant::now();
+            // **Raced against the stop, which it was not until 2026-09-04.**
+            // The check above happens before a call the Server may hold open
+            // for the whole of `poll_wait`, so a stop arriving during the
+            // hold cancelled nothing: the process sat there uninterruptible
+            // while its grace ran out, and everything it had already
+            // forwarded to the judge stayed leased for the full lease
+            // instead of being handed back.
+            //
+            // Settled rather than dropped when the stop wins, for the reason
+            // the sandboxing Runner gives at its own claim: the Server
+            // commits a handout before writing the answer to it, so a
+            // dropped request is sometimes a job this Runner owns and cannot
+            // release, never having learned the lease token. Two seconds is
+            // a response in flight; it is not a poll.
+            // Cloned so the future in flight borrows this handle rather
+            // than `self` — the stopping arm below hands work back, and
+            // that needs the Runner itself.
+            let server = Arc::clone(&self.server);
+            let mut claim = std::pin::pin!(server.claim(Some(self.config.lease_seconds), wait));
+            let claimed = tokio::select! {
+                // An answer already in hand beats a stop that arrived with
+                // it, rather than a coin flip that throws the job away.
+                biased;
+                claimed = &mut claim => claimed,
+                _ = stopping.wait() => {
+                    if let Ok(Ok(Some(job))) =
+                        tokio::time::timeout(SETTLE, &mut claim).await
+                    {
+                        // **Released, never forwarded.** Taking it would put
+                        // a real submission on the judge's account that this
+                        // installation is about to abandon, and then hand
+                        // the job back for the next Runner to forward again
+                        // — two submissions on somebody else's site for one
+                        // attempt.
+                        gave_back(&server, &job).await;
+                    }
+                    // Not here: another task may be holding an answer for
+                    // one of these. `work` releases once, after the join.
+                    return Ok(());
+                }
+            };
+            match claimed {
+                Ok(Some(job)) => {
+                    // **Asked and granted, side by side.** The Server may
+                    // apply its own default when it reads no request, and
+                    // every lease guard in `Config` computes with the number
+                    // on this side — so a disagreement here is invisible
+                    // from either log alone.
+                    tracing::info!(
+                        job = %job.job_id,
+                        asked = self.config.lease_seconds,
+                        granted = %job.lease_expires_at,
+                        "claimed"
+                    );
+                    claiming.reset();
+
+                    // **Asked again between the answer and the forward.**
+                    // `biased` hands over a job that arrived at the same
+                    // instant as the stop, which is right — but forwarding
+                    // it would submit to the judge on the way out and then
+                    // release the job below, so the next Runner forwards it
+                    // a second time. Giving it straight back costs one round
+                    // trip and nothing else.
+                    if stopping.now() {
+                        gave_back(&server, &job).await;
                         return Ok(());
                     }
-                };
-                match claimed {
-                    Ok(Some(job)) => {
-                        // **Asked and granted, side by side.** The Server may
-                        // apply its own default when it reads no request, and
-                        // every lease guard in `Config` computes with the number
-                        // on this side — so a disagreement here is invisible
-                        // from either log alone.
-                        tracing::info!(
-                            job = %job.job_id,
-                            asked = self.config.lease_seconds,
-                            granted = %job.lease_expires_at,
-                            "claimed"
-                        );
-                        claiming.reset();
 
-                        // **Asked again between the answer and the forward.**
-                        // `biased` hands over a job that arrived at the same
-                        // instant as the stop, which is right — but forwarding
-                        // it would submit to the judge on the way out and then
-                        // release the job below, so the next Runner forwards it
-                        // a second time. Giving it straight back costs one round
-                        // trip and nothing else.
-                        if stopping.now() {
-                            gave_back(&server, &job).await;
-                            return Ok(());
-                        }
-
-                        self.take(job).await;
-                        continue;
-                    }
-                    Ok(None) => {
-                        // **Told apart by how long it took**, not by the
-                        // setting: a Server that does not know about
-                        // `waitSeconds` answers at once, and so does one that is
-                        // draining, and neither should be asked again
-                        // immediately.
-                        held = wait.is_some_and(|wait| asked.elapsed() >= wait / 2);
-                    }
-                    Err(e) if e.needs_handshake() => {
-                        self.server.forget_token();
-                        admitted(&self.server, identity, &self.config, &self.judge, stopping)
-                            .await?;
-                        continue;
-                    }
-                    // **Up and declining to serve is not the same as broken.**
-                    // The window is named in the log with the operator's own
-                    // reason, and the wait is the longer of ours and theirs.
-                    Err(e) if e.unavailable() || e.in_maintenance() => {
-                        if !wait_out(&self.server, &e, &mut claiming, stopping).await {
-                            return Ok(());
-                        }
-                    }
-                    // The key is finished; no wait revives it, and carrying on
-                    // would be a loop asking to be refused.
-                    Err(e) if e.revoked() => {
-                        return Err(anyhow::anyhow!(
-                        "this Runner's key has been revoked; it needs a new key and a new registration, which no retry can do: {e}"
-                    ));
-                    }
-                    Err(e) => tracing::warn!(%e, "could not ask for work"),
+                    self.take(job).await;
+                    continue;
                 }
+                Ok(None) => {
+                    // **Told apart by how long it took**, not by the
+                    // setting: a Server that does not know about
+                    // `waitSeconds` answers at once, and so does one that is
+                    // draining, and neither should be asked again
+                    // immediately.
+                    held = wait.is_some_and(|wait| asked.elapsed() >= wait / 2);
+                }
+                Err(e) if e.needs_handshake() => {
+                    self.server.forget_token();
+                    admitted(&self.server, identity, &self.config, &self.judge, stopping).await?;
+                    continue;
+                }
+                // **Up and declining to serve is not the same as broken.**
+                // The window is named in the log with the operator's own
+                // reason, and the wait is the longer of ours and theirs.
+                Err(e) if e.unavailable() || e.in_maintenance() => {
+                    if !wait_out(&self.server, &e, &mut claiming, stopping).await {
+                        return Ok(());
+                    }
+                }
+                // The key is finished; no wait revives it, and carrying on
+                // would be a loop asking to be refused.
+                Err(e) if e.revoked() => {
+                    return Err(anyhow::anyhow!(
+                    "this Runner's key has been revoked; it needs a new key and a new registration, which no retry can do: {e}"
+                ));
+                }
+                Err(e) => tracing::warn!(%e, "could not ask for work"),
             }
 
             // **No backoff after a claim the Server held.** The wait *was* the
