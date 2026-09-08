@@ -15,6 +15,7 @@ pub mod uhunt;
 pub mod verdict;
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::integration::{Judge, Language, Outcome, Refused, Setup};
@@ -55,9 +56,13 @@ pub struct Uva {
     /// unreachable uHunt into a Runner that never appeared in the manager panel
     /// at all. It is needed to poll, and polling only happens once something has
     /// been submitted.
-    uid: Option<u64>,
+    ///
+    /// **Behind a lock because this judge is shared**, not because two tasks
+    /// race for it meaningfully: the lock is never held across a request, so a
+    /// simultaneous first need costs one duplicate lookup and nothing else.
+    uid: Mutex<Option<u64>>,
     /// Public number to uHunt's internal id. Ours to re-derive, not to depend on.
-    numbers: BTreeMap<i64, i64>,
+    numbers: Mutex<BTreeMap<i64, i64>>,
 }
 
 impl Uva {
@@ -66,22 +71,22 @@ impl Uva {
             site,
             uhunt,
             username,
-            uid,
-            numbers: BTreeMap::new(),
+            uid: Mutex::new(uid),
+            numbers: Mutex::new(BTreeMap::new()),
             poll_cursor: std::sync::atomic::AtomicI64::new(0),
             poll_primed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// The account's numeric id, resolved the first time it is wanted.
-    async fn account(&mut self) -> Option<u64> {
-        if let Some(uid) = self.uid {
+    async fn account(&self) -> Option<u64> {
+        if let Some(uid) = *self.uid.lock().expect("the uid lock") {
             return Some(uid);
         }
         match self.uhunt.user_id(&self.username).await {
             Ok(uid) => {
                 tracing::info!(uid, "resolved the archive account");
-                self.uid = Some(uid);
+                *self.uid.lock().expect("the uid lock") = Some(uid);
                 Some(uid)
             }
             // Not reaching uHunt says nothing about anybody's solution, and the
@@ -118,8 +123,12 @@ impl Judge for Uva {
         problem::read(props, config)
     }
 
-    async fn problem(&mut self, number: i64) -> anyhow::Result<i64> {
-        if let Some(pid) = self.numbers.get(&number) {
+    async fn problem(&self, number: i64) -> anyhow::Result<i64> {
+        // **Read and released before the request.** Holding it across the await
+        // would serialise every problem lookup behind the slowest one, and the
+        // only cost of not holding it is that two tasks asking for the same
+        // unknown number at the same instant both ask uHunt once.
+        if let Some(pid) = self.numbers.lock().expect("the number lock").get(&number) {
             return Ok(*pid);
         }
         let found = self.uhunt.problem(number).await?;
@@ -128,7 +137,10 @@ impl Judge for Uva {
                 "onlinejudge.org lists problem {number} as unavailable, so it cannot be judged"
             );
         }
-        self.numbers.insert(number, found.pid);
+        self.numbers
+            .lock()
+            .expect("the number lock")
+            .insert(number, found.pid);
         Ok(found.pid)
     }
 
@@ -173,7 +185,7 @@ impl Judge for Uva {
     /// appears. The verdict on the event is deliberately ignored; a stream that
     /// silently drops what it cannot buffer would turn a lost event into a
     /// submission that hangs until it times out.
-    async fn wait_for_a_sign(&mut self, within: Duration) -> bool {
+    async fn wait_for_a_sign(&self, within: Duration) -> bool {
         let Some(uid) = self.account().await else {
             tokio::time::sleep(within).await;
             return false;
@@ -212,7 +224,7 @@ impl Judge for Uva {
     /// grows with how long that one has been waiting rather than with how many
     /// are waiting. Rows that are not ours come back too and are dropped by the
     /// caller, silently, because the account is shared.
-    async fn answers(&mut self, outstanding: &[i64]) -> anyhow::Result<Vec<Row>> {
+    async fn answers(&self, outstanding: &[i64]) -> anyhow::Result<Vec<Row>> {
         let Some(after) = uhunt::cursor(outstanding.iter().copied()) else {
             return Ok(Vec::new());
         };

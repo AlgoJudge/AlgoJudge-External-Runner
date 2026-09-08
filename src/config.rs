@@ -263,9 +263,9 @@ impl Config {
                 poll_min: number("External__PollMinSeconds", POLL_FLOOR_SECONDS)?,
                 poll_max: number("External__PollMaxSeconds", 60)?,
                 poll_escalate_after: number("External__PollEscalateAfterSeconds", 120)?,
-                submit_min_interval: number("External__SubmitMinIntervalSeconds", 5)?,
+                submit_min_interval: number("External__SubmitMinIntervalSeconds", 1)?,
                 pending_timeout: number("External__PendingTimeoutSeconds", 900)?,
-                max_pending: number("External__MaxPending", 20)? as usize,
+                max_pending: number("External__MaxPending", 100)? as usize,
                 long_poll_enabled: flag("External__LongPollEnabled", DEFAULT_LONG_POLL_ENABLED)?,
             },
         };
@@ -496,9 +496,9 @@ mod tests {
                 poll_min: 20,
                 poll_max: 60,
                 poll_escalate_after: 120,
-                submit_min_interval: 5,
+                submit_min_interval: 1,
                 pending_timeout: 900,
-                max_pending: 20,
+                max_pending: 100,
                 long_poll_enabled: DEFAULT_LONG_POLL_ENABLED,
             },
         }

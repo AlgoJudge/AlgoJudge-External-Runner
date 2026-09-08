@@ -126,6 +126,6 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
     // answer, and catching the signal there would only make a stop hang.
     let stopping = aj_protocol::stopping::Stopping::listen();
 
-    let mut runner = run::Runner::new(std::sync::Arc::new(server), cache, judge, config);
+    let runner = run::Runner::new(std::sync::Arc::new(server), cache, judge, config);
     runner.work(&identity, &stopping).await
 }
