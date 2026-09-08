@@ -498,7 +498,7 @@ mod tests {
                 poll_escalate_after: 120,
                 submit_min_interval: 1,
                 pending_timeout: 900,
-                max_pending: 20,
+                max_pending: 200,
                 long_poll_enabled: DEFAULT_LONG_POLL_ENABLED,
             },
         }

@@ -1,10 +1,13 @@
 //! The loop: take work, hand it to the judge, wait, report.
 //!
-//! **One loop with two clocks**, rather than two tasks with a lock between them.
-//! Asking our own Server for work is cheap and may be frequent; asking somebody
-//! else's judge is neither, and is floored at twenty seconds. Keeping both in
-//! one place means the pending set needs no synchronisation and the order of
-//! operations is on the screen rather than in a scheduler.
+//! **Three concurrent waits**, joined in `work`: one asks our own Server for
+//! work, one asks the judge about what is outstanding, one holds the judge's
+//! live channel. They are separate because asking the Server may be held open
+//! for `AJ_Poll__WaitSeconds`, and a task that waited there before listening was
+//! deaf for that long with a submission already at the archive.
+//!
+//! The pending set is therefore shared, behind a lock that is never held across
+//! an await.
 //!
 //! **Nothing here names an archive.** Every reach outside the installation goes
 //! through `crate::integration::Judge`, so adding a second judging system is a
@@ -266,8 +269,7 @@ impl<J: Judge> Runner<J> {
             arrived: Notify::new(),
             sign: Notify::new(),
             settled: Notify::new(),
-            // Replaced by `work`'s own handle. A Runner that has not started
-            // has nothing to hand back, so this one is never waited on.
+            // Set by `work`, which is the only thing that can be stopped.
             stopping: OnceLock::new(),
         }
     }
@@ -377,7 +379,10 @@ impl<J: Judge> Runner<J> {
                             // attempt.
                             gave_back(&server, &job).await;
                         }
-                        self.give_everything_back().await;
+                        // **Not `give_everything_back` here.** The other tasks
+                        // are still running under the same join, and releasing
+                        // what one of them is holding an answer for discards
+                        // the answer. `work` does it once, after the join.
                         return Ok(());
                     }
                 };
@@ -405,7 +410,6 @@ impl<J: Judge> Runner<J> {
                         // trip and nothing else.
                         if stopping.now() {
                             gave_back(&server, &job).await;
-                            self.give_everything_back().await;
                             return Ok(());
                         }
 
@@ -493,6 +497,13 @@ impl<J: Judge> Runner<J> {
                 continue;
             }
 
+            // **Registered before the work below, not at the select.** A sign
+            // raised while this task is renewing or harvesting would otherwise
+            // be dropped, and the verdict would wait out the whole interval.
+            let sign = self.sign.notified();
+            tokio::pin!(sign);
+            sign.as_mut().enable();
+
             let now = Instant::now();
             if now >= renew_at {
                 self.renew_everything().await;
@@ -502,21 +513,26 @@ impl<J: Judge> Runner<J> {
                 self.harvest().await;
                 self.expire().await;
                 collect_at = Instant::now() + self.cycle();
-                if self.outstanding() == 0 {
-                    self.settled.notify_waiters();
-                }
+            }
+
+            // **After both**, because renewal drops entries as well: a set
+            // emptied by a lost lease would otherwise leave the channel open.
+            if self.outstanding() == 0 {
+                self.settled.notify_waiters();
             }
 
             if stopping.now() {
                 return Ok(());
             }
 
-            let until = collect_at.saturating_duration_since(Instant::now());
+            let until = collect_at
+                .min(renew_at)
+                .saturating_duration_since(Instant::now());
             tokio::select! {
                 _ = tokio::time::sleep(until) => {}
                 // Now, not at the top of the next interval: waking early and
                 // then waiting anyway would spend the channel on nothing.
-                _ = self.sign.notified() => collect_at = Instant::now(),
+                _ = sign => collect_at = Instant::now(),
                 _ = stopping.wait() => return Ok(()),
             }
         }
@@ -579,6 +595,7 @@ impl<J: Judge> Runner<J> {
         self.pending.lock().expect("the pending lock").len()
     }
 
+    /// Hands back everything this Runner is waiting on, because it is stopping.
     ///
     /// **A systemic act, not a processing error.** Nothing went wrong with any
     /// of these submissions; the platform is taking their Runner away. So the
