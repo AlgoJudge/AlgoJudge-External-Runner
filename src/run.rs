@@ -247,6 +247,14 @@ pub struct Runner<J: Judge> {
     /// whole of what passes between them, because a stream that can drop events
     /// may say *ask now* and must never say *here is the verdict*.
     sign: Notify,
+    /// Raised when the last outstanding submission has been answered for.
+    ///
+    /// **So the live channel is dropped the moment there is nothing to hear
+    /// about.** Without it, a request already in flight when the last verdict
+    /// landed would go on being held — and then re-made — for up to
+    /// `AJ_External__PollMaxSeconds` against somebody else's service, with
+    /// nothing outstanding to justify it.
+    settled: Notify,
 
     /// **Held rather than passed**, because the waits that have to hear it are
     /// not all in `work`: the report retry is four calls down, and threading a
@@ -267,6 +275,7 @@ impl<J: Judge> Runner<J> {
             pending: Mutex::new(Pending::default()),
             arrived: Notify::new(),
             sign: Notify::new(),
+            settled: Notify::new(),
             // Replaced by `work`'s own handle. A Runner that has not started
             // has nothing to hand back, so this one is never waited on.
             stopping: OnceLock::new(),
@@ -529,6 +538,9 @@ impl<J: Judge> Runner<J> {
                 self.harvest().await;
                 self.expire().await;
                 collect_at = Instant::now() + self.cycle();
+                if self.outstanding() == 0 {
+                    self.settled.notify_waiters();
+                }
             }
 
             if stopping.now() {
@@ -576,8 +588,17 @@ impl<J: Judge> Runner<J> {
                 continue;
             }
 
+            // **Registered before the wait, for the reason `arrived` is.**
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+
             let told = tokio::select! {
                 told = self.judge.wait_for_a_sign(Duration::from_secs(self.config.external.poll_max)) => told,
+                // Nothing left to hear about: drop the channel now rather than
+                // holding somebody else's request open for the rest of the
+                // interval.
+                _ = settled => false,
                 _ = stopping.wait() => return Ok(()),
             };
             if told {
