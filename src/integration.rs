@@ -257,6 +257,21 @@ pub trait Judge: Send + Sync {
         config: Option<&serde_json::Value>,
     ) -> anyhow::Result<Setup>;
 
+    /// **Told before a submission that nothing else is outstanding.**
+    ///
+    /// A live channel is a position in somebody else's stream, and the position
+    /// goes stale while there is nothing to wait for: this Runner stops asking
+    /// when its pending set empties, and uHunt keeps only its last hundred
+    /// events. Taking the position again before the first submission of a batch
+    /// is what keeps the channel usable; taking it while others are still
+    /// outstanding would discard what they are waiting for.
+    ///
+    /// The default does nothing, because an integration without a channel has
+    /// no position to keep.
+    fn note_where_the_channel_is(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// **Waits until the judge gives a reason to ask, or until `within` is up.**
     /// `true` means something happened; `false` means the wait simply ended.
     ///

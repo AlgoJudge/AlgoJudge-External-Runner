@@ -629,6 +629,14 @@ impl<J: Judge> Runner<J> {
         setup: Setup,
         language: i64,
     ) -> Result<(i64, Entry), Blocked> {
+        // **Where a live channel is, taken before the first of a batch leaves.**
+        // Nothing is outstanding, so nothing can be lost by moving the
+        // position — and the position goes stale while this Runner is idle,
+        // because it stops listening when it has nothing to wait for.
+        if self.pending.is_empty() {
+            self.judge.note_where_the_channel_is().await;
+        }
+
         let pid = self
             .judge
             .problem(setup.number)

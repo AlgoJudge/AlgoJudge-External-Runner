@@ -958,14 +958,19 @@ async fn a_source_that_is_not_text_is_a_verdict_and_not_a_failure() {
 /// soon as it has something outstanding: without that, this test would pass on
 /// the immediate harvest and prove nothing about the stream.
 ///
-/// **What it does not cover is when the cursor is taken.** The stand-in answers
-/// the same event whatever cursor it is given, so a Runner that took the head
-/// *after* submitting still passes here — while against the archive it loses
-/// every verdict that landed in the opening batch, which is what a fast judge
-/// produces. That one is held by `Uva::take_the_stream_head` being called from
-/// `submit`, and was found by measuring against onlinejudge.org rather than
-/// here: 64 s to a verdict with the cursor taken late, against 20-28 s with no
-/// accelerator at all.
+/// **What it does not cover is *when* the position is taken**, and there are two
+/// of those. Taking it after a submission leaves loses the verdict that landed
+/// in the opening batch, which a fast judge produces; taking it once per process
+/// leaves it stale after an idle spell, because this Runner stops listening when
+/// nothing is outstanding and uHunt keeps only its last hundred events.
+///
+/// Neither shows up here: the stand-in answers the same event whatever position
+/// it is given, so a Runner that never moved the position passes. Modelling it
+/// needs a stand-in that knows when the submission happened. The first was found
+/// by measuring against onlinejudge.org — 64 s to a verdict with the position
+/// taken late, against 20-28 s with no accelerator at all — and both are held by
+/// `Runner::forward` calling `note_where_the_channel_is` before the first
+/// submission of a batch.
 #[tokio::test]
 async fn an_event_about_our_account_is_answered_without_waiting_for_the_interval() {
     let mock = MockServer::start().await;

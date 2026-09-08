@@ -73,28 +73,6 @@ impl Uva {
         }
     }
 
-    /// Notes where the live stream is, once, so that everything after it is news.
-    ///
-    /// Failing is not an error worth reporting: the cursor stays unset, the next
-    /// submission tries again, and the interval net was never depending on it.
-    async fn take_the_stream_head(&self) {
-        use std::sync::atomic::Ordering;
-        if self.poll_primed.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        match self.uhunt.poll(0, Duration::from_secs(2)).await {
-            Ok(events) => {
-                if let Some(last) = events.last() {
-                    self.poll_cursor.store(last.id, Ordering::SeqCst);
-                }
-            }
-            Err(e) => {
-                tracing::debug!(%e, "could not read where the archive's live stream is");
-                self.poll_primed.store(false, Ordering::SeqCst);
-            }
-        }
-    }
-
     /// The account's numeric id, resolved the first time it is wanted.
     async fn account(&mut self) -> Option<u64> {
         if let Some(uid) = self.uid {
@@ -161,12 +139,30 @@ impl Judge for Uva {
         source: &str,
         min_interval: Duration,
     ) -> Result<i64, Refused> {
-        // **Before the submission leaves, not after.** See `poll_cursor`.
-        self.take_the_stream_head().await;
-
         self.site
             .submit(number, language, source, min_interval)
             .await
+    }
+
+    /// Takes the stream's position, so that everything after it is news.
+    ///
+    /// `/api/poll/0` answers with the last hundred events — history — so
+    /// whoever asks it discards a batch. That is why the caller says *when*:
+    /// before a submission that nothing else is waiting behind.
+    ///
+    /// Failing costs nothing but promptness: the cursor keeps whatever it had,
+    /// the interval net still runs, and the next batch asks again.
+    async fn note_where_the_channel_is(&self) {
+        use std::sync::atomic::Ordering;
+        match self.uhunt.poll(0, Duration::from_secs(2)).await {
+            Ok(events) => {
+                if let Some(last) = events.last() {
+                    self.poll_cursor.store(last.id, Ordering::SeqCst);
+                    self.poll_primed.store(true, Ordering::SeqCst);
+                }
+            }
+            Err(e) => tracing::debug!(%e, "could not read where the archive's live stream is"),
+        }
     }
 
     /// **uHunt holds the request until something happens**, so this is a wait,
