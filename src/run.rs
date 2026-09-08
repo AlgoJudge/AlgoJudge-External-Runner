@@ -62,6 +62,57 @@ pub fn declared<J: Judge>(config: &Config, judge: &J) -> Vec<String> {
     }
 }
 
+/// The longer of this Runner's own backoff and what the Server asked for.
+///
+/// Advice, not an instruction, and the arithmetic says which: an operator's
+/// `Retry-After: 300` is honoured because it is longer, and a proxy's
+/// `Retry-After: 0` cannot turn a retry into a spin because it is not.
+fn how_long(e: &aj_protocol::Error, backoff: &mut Backoff) -> Duration {
+    let mine = backoff.next_delay();
+    e.retry_after()
+        .filter(|asked| *asked > mine)
+        .unwrap_or(mine)
+}
+
+/// Waits out a Server that is up and declining to serve, and says which it is.
+///
+/// **Answers `false` when the word came instead**, which is not the same as the
+/// window having ended: the caller is going away, and a window advertising
+/// `Retry-After: 300` must not hold a stopping Runner past its grace.
+///
+/// Asks `/health` rather than guessing. It is anonymous, it answers at every
+/// level, and it carries the operator's own words — so a Runner that waits in
+/// silence is indistinguishable from one that has died, and this one is not.
+async fn wait_out(
+    server: &Server,
+    e: &aj_protocol::Error,
+    backoff: &mut Backoff,
+    stopping: &Stopping,
+) -> bool {
+    let delay = how_long(e, backoff);
+
+    match server.health().await {
+        Ok(health) if health.open() => {
+            tracing::info!("the Server is serving again");
+            backoff.reset();
+            return true;
+        }
+        Ok(health) => tracing::info!(
+            level = health.level(),
+            reason = health.reason().unwrap_or("none given"),
+            ?delay,
+            "the Server is under maintenance; waiting",
+        ),
+        Err(unreachable) => tracing::warn!(
+            %unreachable,
+            ?delay,
+            "the Server is not serving, and health could not be read either; waiting",
+        ),
+    }
+
+    stopping.sleep(delay).await
+}
+
 /// Registered and holding a token, however long that takes.
 pub async fn admitted<J: Judge>(
     server: &Server,
@@ -70,7 +121,10 @@ pub async fn admitted<J: Judge>(
     judge: &J,
     stopping: &Stopping,
 ) -> anyhow::Result<()> {
-    let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(60));
+    let mut backoff = Backoff::new(
+        Duration::from_secs(config.claim_poll_min),
+        Duration::from_secs(config.claim_poll_max),
+    );
 
     loop {
         let asked = server
@@ -94,7 +148,21 @@ pub async fn admitted<J: Judge>(
             .await;
 
         match asked {
-            Ok(registered) if registered.approved() => break,
+            Ok(registered) if registered.approved() => {
+                // **The Server's answer names the key it registered.** A
+                // mismatch means this process is holding one key and the Server
+                // another — a mounted volume from a different deployment is the
+                // way it happens — and every claim after it would be refused
+                // for a reason that reads like somebody else's fault.
+                let mine = identity.fingerprint();
+                if registered.fingerprint != mine {
+                    return Err(anyhow::anyhow!(
+                        "the Server registered the fingerprint {} and this Runner holds {mine}; the key on disk is not the key the Server knows",
+                        registered.fingerprint,
+                    ));
+                }
+                break;
+            }
             // **Every wait here is raced against the word.** Waiting for a
             // manager to press approve is the longest thing this Runner ever
             // does, and until 2026-09-04 it took no stop handle at all — so a
@@ -107,11 +175,17 @@ pub async fn admitted<J: Judge>(
                     _ = stopping.wait() => return Ok(()),
                 }
             }
-            Err(e) if e.retryable() || e.unavailable() => {
-                tracing::warn!(%e, "the Server could not take the registration");
-                tokio::select! {
-                    _ = backoff.wait() => {}
-                    _ = stopping.wait() => return Ok(()),
+            // **The key is finished, and no amount of waiting revives it.**
+            // There is no rotation: a new key is a new configuration and a new
+            // registration, which is a person's decision.
+            Err(e) if e.revoked() => {
+                return Err(anyhow::anyhow!(
+                    "this Runner's key has been revoked; it needs a new key and a new registration, which no retry can do: {e}"
+                ));
+            }
+            Err(e) if e.retryable() || e.unavailable() || e.in_maintenance() => {
+                if !wait_out(server, &e, &mut backoff, stopping).await {
+                    return Ok(());
                 }
             }
             Err(e) => return Err(anyhow::anyhow!("the Server refused the registration: {e}")),
@@ -129,7 +203,12 @@ pub async fn admitted<J: Judge>(
                     _ = stopping.wait() => return Ok(()),
                 }
             }
-            Err(e) if e.retryable() || e.unavailable() => {
+            Err(e) if e.revoked() => {
+                return Err(anyhow::anyhow!(
+                    "this Runner's key has been revoked; it needs a new key and a new registration, which no retry can do: {e}"
+                ));
+            }
+            Err(e) if e.retryable() || e.unavailable() || e.in_maintenance() => {
                 tracing::warn!(%e, "the handshake could not be completed");
                 tokio::select! {
                     _ = backoff.wait() => {}
@@ -183,7 +262,10 @@ impl<J: Judge> Runner<J> {
         // Kept, so the report retry four calls down hears it too.
         self.stopping = stopping.clone();
 
-        let mut claiming = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        let mut claiming = Backoff::new(
+            Duration::from_secs(self.config.claim_poll_min),
+            Duration::from_secs(self.config.claim_poll_max),
+        );
         let mut ask_judge_at = Instant::now();
 
         // **Liveness on a timer of its own.** It used to be a threshold checked
@@ -319,6 +401,23 @@ impl<J: Judge> Runner<J> {
                         }
                         continue;
                     }
+                    // **Up and declining to serve is not the same as broken.**
+                    // The window is named in the log with the operator's own
+                    // reason, and the wait is the longer of ours and theirs.
+                    Err(e) if e.unavailable() || e.in_maintenance() => {
+                        if !wait_out(&self.server, &e, &mut claiming, stopping).await {
+                            beating.abort();
+                            return Ok(());
+                        }
+                    }
+                    // The key is finished; no wait revives it, and carrying on
+                    // would be a loop asking to be refused.
+                    Err(e) if e.revoked() => {
+                        beating.abort();
+                        return Err(anyhow::anyhow!(
+                            "this Runner's key has been revoked; it needs a new key and a new registration, which no retry can do: {e}"
+                        ));
+                    }
                     Err(e) => tracing::warn!(%e, "could not ask for work"),
                 }
             }
@@ -343,9 +442,20 @@ impl<J: Judge> Runner<J> {
                     }
                 }
             } else {
+                // **The wait is the judge's, where it has one.** An integration
+                // with a live channel holds this open and returns the moment it
+                // hears about our account; one without it sleeps, which is what
+                // the interval net was always doing.
                 let until = ask_judge_at.saturating_duration_since(Instant::now());
                 tokio::select! {
-                    _ = tokio::time::sleep(until.min(Duration::from_secs(5))) => {}
+                    told = self.judge.wait_for_a_sign(until) => {
+                        // Asked now rather than at the top of the next
+                        // interval: waking early and then waiting anyway would
+                        // spend the accelerator on nothing.
+                        if told {
+                            ask_judge_at = Instant::now();
+                        }
+                    }
                     _ = stopping.wait() => {}
                 }
             }
@@ -391,9 +501,10 @@ impl<J: Judge> Runner<J> {
 
     /// How long until the judge is asked again.
     ///
-    /// **The long-poll trigger is not built yet**, so the interval is computed as
-    /// if the accelerator were off — which is what makes escalation earn its
-    /// keep. Wiring the trigger later changes this line and nothing else.
+    /// **Flat where the trigger is on**, because the stream is what makes a
+    /// verdict prompt and this is what makes it certain. With it off the
+    /// interval escalates instead, and freshness is traded against being a
+    /// guest on somebody else's infrastructure.
     fn cycle(&self) -> Duration {
         let oldest = self
             .pending
@@ -402,7 +513,7 @@ impl<J: Judge> Runner<J> {
             .max()
             .unwrap_or_default();
         crate::schedule::interval(
-            false,
+            self.config.external.long_poll_enabled,
             oldest,
             Duration::from_secs(self.config.external.poll_min),
             Duration::from_secs(self.config.external.poll_max),
@@ -454,9 +565,17 @@ impl<J: Judge> Runner<J> {
                 );
                 self.pending.insert(entry.0, entry.1);
             }
-            Err(why) => {
+            Err(Blocked::Verdict(refusal)) => {
+                tracing::info!(job = %job.job_id, %refusal, "cannot be handed over as it stands");
+                self.send(
+                    &job.job_id,
+                    &ReportResult::judged(&token, 0.0, 1.0, crate::integration::POLICY_VIOLATION),
+                )
+                .await;
+            }
+            Err(Blocked::Failure(why)) => {
                 tracing::warn!(job = %job.job_id, %why, "not forwarded");
-                self.fail(&job.job_id, &token, &why.to_string()).await;
+                self.fail(&job.job_id, &token, &why).await;
             }
         }
     }
@@ -509,20 +628,42 @@ impl<J: Judge> Runner<J> {
         job: &ClaimedJob,
         setup: Setup,
         language: i64,
-    ) -> anyhow::Result<(i64, Entry)> {
-        let pid = self.judge.problem(setup.number).await?;
+    ) -> Result<(i64, Entry), Blocked> {
+        // **Where a live channel is, taken before the first of a batch leaves.**
+        // Nothing is outstanding, so nothing can be lost by moving the
+        // position — and the position goes stale while this Runner is idle,
+        // because it stops listening when it has nothing to wait for.
+        if self.pending.is_empty() {
+            self.judge.note_where_the_channel_is().await;
+        }
+
+        let pid = self
+            .judge
+            .problem(setup.number)
+            .await
+            .map_err(|e| Blocked::Failure(e.to_string()))?;
 
         let submitted = job
             .files
             .iter()
             .find(|f| f.name == "source")
             .or_else(|| job.files.first())
-            .ok_or_else(|| anyhow::anyhow!("the submission carries no file"))?;
+            .ok_or_else(|| Blocked::Failure("the submission carries no file".to_owned()))?;
         let held = self
             .cache
             .fetch(&self.server, &submitted.file_id, &submitted.sha256)
-            .await?;
-        let source = std::fs::read_to_string(held.path())?;
+            .await
+            .map_err(|e| Blocked::Failure(e.to_string()))?;
+
+        // **A source that is not text is a verdict, not a failure of ours.**
+        // What leaves this installation is the bytes of a form field, so a file
+        // this cannot decode is one the judge could never have been given —
+        // and calling that an infrastructure failure made it rejudgeable, which
+        // meant every rejudge repeated it for ever against a file that will
+        // never change.
+        let bytes = std::fs::read(held.path()).map_err(|e| Blocked::Failure(e.to_string()))?;
+        let source = String::from_utf8(bytes)
+            .map_err(|_| Blocked::Verdict("the source file is not valid UTF-8 text".to_owned()))?;
 
         let name = self.judge.name();
         let sid = self
@@ -546,7 +687,8 @@ impl<J: Judge> Runner<J> {
                      attempt"
                 ),
                 Refused::Site(why) => anyhow::anyhow!("{name} refused the submission: {why}"),
-            })?;
+            })
+            .map_err(|e| Blocked::Failure(e.to_string()))?;
 
         Ok((
             sid,
@@ -649,6 +791,19 @@ impl<J: Judge> Runner<J> {
             };
             self.attach(&entry, document).await;
             self.send(&entry.job_id, &report).await;
+
+            // **The loop closing is worth a line, because its absence reads as
+            // a stall.** Handing over is logged and resolving was not, so a
+            // healthy Runner and one wedged after submitting look identical in
+            // the log — right up until the pending set ages out. Whoever is
+            // watching should see the answer come back, and how long it took.
+            tracing::info!(
+                job = %entry.job_id,
+                judge = self.judge.name(),
+                sid,
+                waited = ?entry.sent.elapsed(),
+                "answered",
+            );
         }
     }
 
@@ -800,12 +955,41 @@ impl<J: Judge> Runner<J> {
     /// too and takes every other release with it. The lease requeues the job
     /// either way; the choice is only between losing it cleanly and losing more.
     async fn send(&self, job_id: &str, report: &ReportResult) {
-        let mut backoff = Backoff::new(Duration::from_secs(2), Duration::from_secs(30));
-        for _ in 0..10 {
+        let mut backoff = Backoff::new(
+            Duration::from_secs(self.config.claim_poll_min),
+            Duration::from_secs(self.config.claim_poll_max),
+        );
+        // **Bounded by the lease, not by a count.** Ten attempts was the better
+        // part of five minutes against a lease of twenty, so a Server that came
+        // back at minute six found the answer already abandoned. What makes
+        // giving up right is the lease expiring, because that is the moment
+        // somebody else may legitimately take the job.
+        let until = Instant::now() + Duration::from_secs(u64::from(self.config.lease_seconds));
+        while Instant::now() < until {
             match self.server.report(job_id, report).await {
-                Ok(_) => return,
+                Ok(accepted) => {
+                    // **A repeat is not an error and says so.** Reporting is
+                    // idempotent, and a Runner that retried into a Server which
+                    // had already stored the answer should say which happened
+                    // rather than leave two indistinguishable log lines.
+                    if accepted.duplicate {
+                        tracing::info!(
+                            job = %job_id,
+                            state = %accepted.state,
+                            "the answer was already stored; this report changed nothing",
+                        );
+                    }
+                    return;
+                }
                 Err(e) if e.lease_lost() => {
                     tracing::warn!(job = %job_id, "the lease was gone; the answer is dropped");
+                    return;
+                }
+                // **A refusal is the Server having decided.** Asking again with
+                // the same body gets the same answer, and the only thing the
+                // repetition adds is a log nobody can act on.
+                Err(e) if !e.retryable() && !e.unavailable() && !e.in_maintenance() => {
+                    tracing::error!(%e, job = %job_id, "the Server refused the report");
                     return;
                 }
                 Err(e) => {

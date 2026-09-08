@@ -15,7 +15,7 @@ pub mod uhunt;
 pub mod verdict;
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::integration::{Judge, Language, Outcome, Refused, Setup};
 use crate::pending::Entry;
@@ -38,6 +38,16 @@ pub struct Uva {
     uhunt: Uhunt,
     /// The account submissions are made under, for resolving `uid`.
     username: String,
+    /// Where the live stream was left, and whether its head has been taken yet.
+    ///
+    /// **Atomic because it is set from `submit`, which takes `&self`** — and it
+    /// has to be set there: `/api/poll/0` answers with the last hundred events,
+    /// which is history rather than news, so whoever takes that answer discards
+    /// it. Taking it *after* a submission leaves discards the batch that may
+    /// already carry that submission's own verdict, and then nothing else ever
+    /// mentions it.
+    poll_cursor: std::sync::atomic::AtomicI64,
+    poll_primed: std::sync::atomic::AtomicBool,
     /// Resolved on first need, not at start-up.
     ///
     /// **A Runner that starts while the archive is down must still register and
@@ -58,6 +68,8 @@ impl Uva {
             username,
             uid,
             numbers: BTreeMap::new(),
+            poll_cursor: std::sync::atomic::AtomicI64::new(0),
+            poll_primed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -130,6 +142,68 @@ impl Judge for Uva {
         self.site
             .submit(number, language, source, min_interval)
             .await
+    }
+
+    /// Takes the stream's position, so that everything after it is news.
+    ///
+    /// `/api/poll/0` answers with the last hundred events — history — so
+    /// whoever asks it discards a batch. That is why the caller says *when*:
+    /// before a submission that nothing else is waiting behind.
+    ///
+    /// Failing costs nothing but promptness: the cursor keeps whatever it had,
+    /// the interval net still runs, and the next batch asks again.
+    async fn note_where_the_channel_is(&self) {
+        use std::sync::atomic::Ordering;
+        match self.uhunt.poll(0, Duration::from_secs(2)).await {
+            Ok(events) => {
+                if let Some(last) = events.last() {
+                    self.poll_cursor.store(last.id, Ordering::SeqCst);
+                    self.poll_primed.store(true, Ordering::SeqCst);
+                }
+            }
+            Err(e) => tracing::debug!(%e, "could not read where the archive's live stream is"),
+        }
+    }
+
+    /// **uHunt holds the request until something happens**, so this is a wait,
+    /// not a poll — and one request a minute rather than three.
+    ///
+    /// The stream is global and keeps only the last hundred events, so what
+    /// arrives is read for one thing alone: whether the account we submit under
+    /// appears. The verdict on the event is deliberately ignored; a stream that
+    /// silently drops what it cannot buffer would turn a lost event into a
+    /// submission that hangs until it times out.
+    async fn wait_for_a_sign(&mut self, within: Duration) -> bool {
+        let Some(uid) = self.account().await else {
+            tokio::time::sleep(within).await;
+            return false;
+        };
+
+        let deadline = Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let cursor = self.poll_cursor.load(std::sync::atomic::Ordering::SeqCst);
+            match self.uhunt.poll(cursor, left).await {
+                Ok(events) => {
+                    if let Some(last) = events.last() {
+                        self.poll_cursor
+                            .store(last.id, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if events.iter().any(|event| event.msg.uid == uid) {
+                        return true;
+                    }
+                }
+                // The stream is an accelerator: losing it costs promptness and
+                // nothing else, because the interval net still runs.
+                Err(e) => {
+                    tracing::debug!(%e, "the archive's live stream did not answer");
+                    tokio::time::sleep(left.min(Duration::from_secs(5))).await;
+                }
+            }
+        }
     }
 
     /// One request, however many submissions are outstanding.

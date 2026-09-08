@@ -83,24 +83,21 @@ pub const DEFAULT_CACHE_PATH: &str = "/var/cache/algojudge-external-runner";
 /// small value.
 pub const DEFAULT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Whether the long-poll accelerator is on when nothing says otherwise.
+/// Whether the archive's live stream is used when nothing says otherwise.
 ///
-/// **Off, and it defaulted to on until 2026-08-31.** `schedule::interval` can
-/// flatten the polling net to its ceiling on this flag, on the promise that a
-/// verdict will arrive by some route other than asking — and the trigger behind
-/// that promise is not built.
+/// **Off, and that is a rule rather than a judgement about this switch.** A key
+/// absent from `.env` means `false`: a name ending in `Enabled` is off until
+/// somebody turns it on, and a name ending in `Disabled` would be on until
+/// somebody turns it off. What a file does not say cannot surprise the person
+/// who did not write it.
 ///
-/// **What the old default actually cost was nothing**, and this said otherwise
-/// until 2026-08-31: it claimed every installation on it had been asking the
-/// archive once a minute instead of three times. `run::cycle` passes
-/// `schedule::interval` a literal `false`, and always has, so the flag has
-/// never reached the scheduler from configuration at all. The default was
-/// misleading rather than harmful, which is still a reason to change it — a
-/// switch that reads as *on* while doing nothing is worse than one that reads
-/// as *off* and does nothing.
-///
-/// A switch defaults to the behaviour that works. When the trigger is built,
-/// this becomes a decision again, and `cycle` has to start passing it.
+/// It costs something here, and the cost is worth stating. The stream makes a
+/// verdict prompt, and turning it on also flattens the interval net to its
+/// ceiling — one request a minute instead of three. Where the stream cannot be
+/// held open, by a proxy that cuts long requests or a network that will not
+/// keep one, the flat net is all that is left and a verdict then waits a minute
+/// rather than twenty seconds. That is worse than not turning it on, and it is
+/// why the operator decides.
 pub const DEFAULT_LONG_POLL_ENABLED: bool = false;
 
 #[derive(Debug, Clone)]
@@ -161,6 +158,16 @@ pub struct Config {
     /// hold one. Anything else makes the claim backoff matter only after a
     /// failure: on an empty queue the wait *is* the interval.
     pub poll_wait: u64,
+
+    /// The floor and ceiling of the wait between asks of **our own Server**,
+    /// after one has failed or come back empty without being held.
+    ///
+    /// Not to be confused with `External__PollMin/MaxSeconds`, which pace the
+    /// asks of somebody else's judge: that one is somebody else's service and
+    /// is floored far higher. These two are the same two keys, with the same
+    /// names, that the sandboxing Runner reads.
+    pub claim_poll_min: u64,
+    pub claim_poll_max: u64,
 
     pub external: External,
 }
@@ -227,6 +234,8 @@ impl Config {
             // learn two. What bounds it is an intermediary rather than this
             // Server; see that Runner's `.env.example` for the table.
             poll_wait: number("Poll__WaitSeconds", 25)?,
+            claim_poll_min: number("Poll__MinSeconds", 1)?,
+            claim_poll_max: number("Poll__MaxSeconds", 30)?,
 
             external: External {
                 judge: var("External__Judge").unwrap_or_else(|_| DEFAULT_JUDGE.into()),
@@ -475,6 +484,8 @@ mod tests {
             cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
             lease_seconds: 1200,
             poll_wait: 25,
+            claim_poll_min: 1,
+            claim_poll_max: 30,
             external: External {
                 judge: DEFAULT_JUDGE.into(),
                 base_url: "https://onlinejudge.org/".into(),
@@ -662,31 +673,30 @@ mod tests {
     /// lease of 3700 against a pending timeout of 3650 clears every other check,
     /// the Server grants 3600, and the job is then held fifty seconds past the
     /// lease it really has. The knowledge lived in a test's doc comment and the
-    /// guard lived nowhere.
-    /// The default is pinned by what it *would* do, not by its own literal.
+    /// **The default is pinned by what it does, not by its own literal.**
     ///
-    /// **And "would" is exact**: `run::cycle` hands `schedule::interval` a
-    /// literal `false`, so no configured value reaches the scheduler and this
-    /// test observes a path production does not take. It is kept, and named for
-    /// what it guards — the day the trigger is built, `cycle` starts passing
-    /// the flag, and a default of `true` would flatten the net to its ceiling
-    /// the moment it does. The doc comment above said this was already
-    /// happening, which was wrong on both sides of the 2026-08-31 change.
+    /// A switch absent from a `.env` is off, so this is off — and off is the
+    /// escalating net, which asks at the floor while a submission is fresh.
+    /// Turning it on trades that for the ceiling on the promise that the stream
+    /// makes a verdict prompt; a default of `true` would make that trade for an
+    /// operator who never asked for it, and behind anything that cuts long-held
+    /// requests it is a trade with nothing on the other side.
     #[test]
-    fn the_accelerator_that_is_not_built_does_not_slow_the_net_down() {
+    fn the_default_leaves_the_net_escalating() {
         let min = std::time::Duration::from_secs(20);
         let max = std::time::Duration::from_secs(60);
+        let fresh = std::time::Duration::ZERO;
+        let escalate = std::time::Duration::from_secs(120);
 
         assert_eq!(
-            crate::schedule::interval(
-                DEFAULT_LONG_POLL_ENABLED,
-                std::time::Duration::ZERO,
-                min,
-                max,
-                std::time::Duration::from_secs(120),
-            ),
+            crate::schedule::interval(DEFAULT_LONG_POLL_ENABLED, fresh, min, max, escalate),
             min,
-            "a fresh submission is asked about at the floor, not at the ceiling"
+            "a fresh submission is asked about at the floor unless somebody opted in"
+        );
+        assert_eq!(
+            crate::schedule::interval(true, fresh, min, max, escalate),
+            max,
+            "and opting in is what flattens it to one request a minute"
         );
     }
 

@@ -103,6 +103,17 @@ async fn uhunt(server: &MockServer, verdict: i64) {
         )))
         .mount(server)
         .await;
+    // **The live stream, and by default it says nothing.** A test that wants the
+    // accelerator to fire mounts its own at a higher priority.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/poll/\d+$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("[]")
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .mount(server)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/subs-user/.*$"))
         .respond_with(ResponseTemplate::new(200).set_body_string(format!(
@@ -118,6 +129,25 @@ async fn uhunt(server: &MockServer, verdict: i64) {
 /// is where the archive's problem number lives.
 fn job(props: &str, config: &str, version_props: &str) -> String {
     job_named("job-1", "sub-1", "token-1", props, config, version_props)
+}
+
+/// A job whose source file is the caller's bytes rather than `SOURCE`.
+fn job_with_source(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let sha: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    job(
+        r#"{"language":"c89-gcc"}"#,
+        r#"{"languages":[]}"#,
+        r#"{"uva":{"problemNumber":100}}"#,
+    )
+    .replace(&source_sha256(), &sha)
+    .replace(
+        "\"sizeBytes\":13",
+        &format!("\"sizeBytes\":{}", bytes.len()),
+    )
 }
 
 /// The same, for a Server handing out more than one.
@@ -242,6 +272,8 @@ fn probe_config(
         // No wait: these tests drive the loop against a mock and assert on what
         // it did, which a held request would only make slower to read.
         poll_wait: 0,
+        claim_poll_min: 1,
+        claim_poll_max: 30,
         external: algojudge_external_runner::config::External {
             judge: "uva".into(),
             base_url: format!("{site}/"),
@@ -856,5 +888,155 @@ async fn told_to_stop_it_hands_back_every_job_it_is_holding() {
     assert!(
         posted_to(&sent, "/report").is_empty(),
         "a stopped Runner reported on work it did not finish",
+    );
+}
+
+/// **A source that is not text is the participant's file, not our machinery.**
+///
+/// Reading it with `read_to_string` made a file in any other encoding an
+/// infrastructure failure — which is rejudgeable, so every rejudge repeated it
+/// against a file that will never change, for ever. What leaves this
+/// installation is the bytes of a form field, so a file that cannot be decoded
+/// is one the judge could never have been given: a verdict, and a final one.
+#[tokio::test]
+async fn a_source_that_is_not_text_is_a_verdict_and_not_a_failure() {
+    // A lone 0xFF: valid in Latin-1, never valid UTF-8.
+    let bytes: Vec<u8> = vec![0x69, 0x6e, 0x74, 0x20, 0xff, 0x0a];
+
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive(&site).await;
+    uhunt(&hunt, 0).await;
+
+    // Mounted first and at a higher priority than the default below it.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/runner/files/file-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+
+    server_handing_out(&mock, job_with_source(&bytes), ResponseTemplate::new(204)).await;
+
+    run_for(
+        probe_config("not-text", &mock.uri(), &site.uri(), &hunt.uri()),
+        Duration::from_millis(1500),
+    )
+    .await;
+
+    let sent = mock.received_requests().await.unwrap();
+    let reports = posted_to(&sent, "/report");
+    assert_eq!(reports.len(), 1, "the job was not answered at all");
+    assert!(
+        !reports[0].contains("\"infrastructureFailure\":true"),
+        "a file that will never decode was reported as our failure, so a rejudge          repeats it for ever: {}",
+        reports[0]
+    );
+    assert!(
+        reports[0].contains("PolicyViolation"),
+        "the participant is not told what was wrong with their file: {}",
+        reports[0]
+    );
+
+    // Nothing left the installation: the archive was never asked to take it.
+    let tried = site.received_requests().await.unwrap();
+    assert!(
+        tried.iter().all(|r| !r.url.path().contains("submit")),
+        "a file that cannot be decoded was still offered to the archive",
+    );
+}
+
+/// **The accelerator earns the flat net, or it is a regression.**
+///
+/// With the stream on the interval is one request a minute, so a verdict that
+/// waits for the interval waits a minute. The trigger exists so that it does
+/// not — and a version that flattened the net while never firing would be
+/// strictly worse than having no accelerator at all.
+///
+/// **The first ask is deliberately fruitless**, because the loop asks once as
+/// soon as it has something outstanding: without that, this test would pass on
+/// the immediate harvest and prove nothing about the stream.
+///
+/// **What it does not cover is *when* the position is taken**, and there are two
+/// of those. Taking it after a submission leaves loses the verdict that landed
+/// in the opening batch, which a fast judge produces; taking it once per process
+/// leaves it stale after an idle spell, because this Runner stops listening when
+/// nothing is outstanding and uHunt keeps only its last hundred events.
+///
+/// Neither shows up here: the stand-in answers the same event whatever position
+/// it is given, so a Runner that never moved the position passes. Modelling it
+/// needs a stand-in that knows when the submission happened. The first was found
+/// by measuring against onlinejudge.org — 64 s to a verdict with the position
+/// taken late, against 20-28 s with no accelerator at all — and both are held by
+/// `Runner::forward` calling `note_where_the_channel_is` before the first
+/// submission of a batch.
+#[tokio::test]
+async fn an_event_about_our_account_is_answered_without_waiting_for_the_interval() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive(&site).await;
+
+    // Still in the queue when the loop asks of its own accord.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/subs-user/.*$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"{{"name":"A Robot","uname":"robot","subs":[[{SID},{PID},0,0,1700000000,5,0]]}}"#
+        )))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&hunt)
+        .await;
+
+    // The stream says something about our account two seconds in; everything
+    // after that is the accelerator's doing, because the interval is a minute.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/poll/\d+$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(
+                    // `uid` is the account `probe_config` gives this Runner: an event
+            // about somebody else's submission must not wake it.
+            r#"[{"id":2,"type":"lastsubs","msg":{"sid":31254724,"uid":1,"pid":36,"ver":90}}]"#,
+                )
+                .set_delay(Duration::from_secs(2)),
+        )
+        .with_priority(1)
+        .mount(&hunt)
+        .await;
+
+    uhunt(&hunt, 90).await;
+    server_handing_out(
+        &mock,
+        job(
+            r#"{"language":"c89-gcc"}"#,
+            r#"{"languages":[]}"#,
+            r#"{"uva":{"problemNumber":100}}"#,
+        ),
+        // A renewal that works, so that what this test measures is the stream
+        // and not a Runner giving a job back.
+        renewed(),
+    )
+    .await;
+
+    let mut config = probe_config("accelerated", &mock.uri(), &site.uri(), &hunt.uri());
+    config.external.long_poll_enabled = true;
+    config.external.poll_min = 60;
+    config.external.poll_max = 60;
+
+    run_for(config, Duration::from_secs(12)).await;
+
+    let sent = mock.received_requests().await.unwrap();
+    let reports = posted_to(&sent, "/report");
+    assert_eq!(
+        reports.len(),
+        1,
+        "the verdict waited for the interval the accelerator is supposed to replace",
+    );
+    assert!(
+        !reports[0].contains("\"infrastructureFailure\":true"),
+        "the report is not a verdict at all: {}",
+        reports[0]
     );
 }

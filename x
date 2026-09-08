@@ -22,6 +22,7 @@
 # Usage:
 #   ./x build            ./x test            ./x fmt
 #   ./x clippy           ./x run -- --help   ./x shell
+#   ./x gate             — fmt, clippy, build and test, as CI runs them
 #
 set -eu
 
@@ -60,12 +61,13 @@ docker build -q -t "$IMAGE" -f Dockerfile.toolchain . >/dev/null
 # that publishes no port to the outside — which is the case in CI, and is the
 # arrangement a real deployment has anyway.
 #
-# `container:<name>` is also accepted, and one test needs it: the maintenance
-# switch answers only to a caller on the **Server's own loopback interface**, so
-# sharing that container's network namespace is the only way a test can be one
-# without a shell inside it. `--add-host` is dropped in that mode because the
-# daemon refuses the two together, and it means nothing there anyway — the
-# namespace is somebody else's.
+# `container:<name>` is also accepted, for a caller that has to appear to come
+# from the **Server's own loopback interface** — the maintenance switch answers
+# nobody else. No test here needs it; `AlgoJudge-Runner` has one that does, and
+# the mode is kept because the two repositories share this script's shape.
+# `--add-host` is dropped in that mode because the daemon refuses the two
+# together, and it means nothing there anyway — the namespace is somebody
+# else's.
 HOST_ALIAS='--add-host=host.docker.internal:host-gateway'
 if [ -n "${AJ_DOCKER_NETWORK:-}" ]; then
     NETWORK="--network=$AJ_DOCKER_NETWORK"
@@ -132,7 +134,7 @@ run() {
         -e AJ_TEST_SERVER \
         -e AJ_ADMIN_TOKEN \
         -e RUST_LOG \
-        -e "AJ_HOST_WORKDIR=$HOST_DIR" \
+\
         $HOST_ALIAS \
         "$IMAGE" "$@"
 }

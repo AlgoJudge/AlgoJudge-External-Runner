@@ -5,6 +5,8 @@
 //! shared, so the window necessarily contains our own finished submissions and
 //! anything a person did by hand while signed into it.
 
+use std::time::Duration;
+
 use serde::Deserialize;
 
 /// One row of `GET /api/subs-user/{uid}/{min-sid}`.
@@ -196,6 +198,50 @@ impl Uhunt {
     pub async fn since(&self, uid: u64, after: i64) -> anyhow::Result<Vec<Row>> {
         rows(&self.text(&format!("subs-user/{uid}/{after}")).await?)
     }
+
+    /// **The live stream, held open until something happens.** uHunt answers at
+    /// once when there is an event and otherwise holds the request for up to a
+    /// minute, so this is a wait rather than a question.
+    ///
+    /// **Global, and lossy by design**: every event of every user goes through
+    /// it and only the last hundred are kept, so a client that stops asking
+    /// loses whatever passed meanwhile. That is why what comes back here is
+    /// never read for a verdict — only as a reason to go and ask properly.
+    ///
+    /// The request's own timeout is raised above the client's minute, which
+    /// would otherwise abort exactly the wait this is for.
+    pub async fn poll(&self, after: i64, within: Duration) -> anyhow::Result<Vec<Event>> {
+        let answer = self
+            .http
+            .get(format!("{}api/poll/{after}", self.base))
+            .timeout(within + Duration::from_secs(15))
+            .send()
+            .await?;
+        let status = answer.status();
+        let body = answer.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("uHunt answered {status} for the live stream");
+        }
+        Ok(serde_json::from_str(&body)?)
+    }
+}
+
+/// One event from the live stream.
+#[derive(Debug, serde::Deserialize)]
+pub struct Event {
+    pub id: i64,
+    #[serde(default)]
+    pub msg: EventAbout,
+}
+
+/// **Only the account matters here.** The event carries the verdict too, and
+/// reading it would be the mistake this whole arrangement avoids: a stream that
+/// drops what it cannot buffer is not a place to learn that somebody's
+/// submission was judged.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct EventAbout {
+    #[serde(default)]
+    pub uid: u64,
 }
 
 #[cfg(test)]
