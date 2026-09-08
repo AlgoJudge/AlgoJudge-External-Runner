@@ -85,16 +85,20 @@ pub const DEFAULT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Whether the archive's live stream is used when nothing says otherwise.
 ///
-/// **On**, because it is both faster and quieter: uHunt holds a request open
-/// for up to a minute and answers the moment something happens, so a verdict
-/// arrives in seconds instead of on the interval — and the interval itself can
-/// then be flat at its ceiling, which is one request a minute where the
-/// escalating net makes three.
+/// **Off, and that is a rule rather than a judgement about this switch.** A key
+/// absent from `.env` means `false`: a name ending in `Enabled` is off until
+/// somebody turns it on, and a name ending in `Disabled` would be on until
+/// somebody turns it off. What a file does not say cannot surprise the person
+/// who did not write it.
 ///
-/// Turning it off is a supported answer for an operator behind something that
-/// cuts long-held requests. The interval net runs either way; the stream only
-/// decides how long a finished submission waits to be noticed.
-pub const DEFAULT_LONG_POLL_ENABLED: bool = true;
+/// It costs something here, and the cost is worth stating. The stream makes a
+/// verdict prompt, and turning it on also flattens the interval net to its
+/// ceiling — one request a minute instead of three. Where the stream cannot be
+/// held open, by a proxy that cuts long requests or a network that will not
+/// keep one, the flat net is all that is left and a verdict then waits a minute
+/// rather than twenty seconds. That is worse than not turning it on, and it is
+/// why the operator decides.
+pub const DEFAULT_LONG_POLL_ENABLED: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -671,37 +675,28 @@ mod tests {
     /// lease it really has. The knowledge lived in a test's doc comment and the
     /// **The default is pinned by what it does, not by its own literal.**
     ///
-    /// The accelerator being on flattens the net to its ceiling, which is only
-    /// right while the stream is there to make a verdict prompt. Turning the
-    /// default on without the trigger — or leaving it on after removing the
-    /// trigger — would make every verdict wait a minute instead of twenty
-    /// seconds, and nothing else would say so.
+    /// A switch absent from a `.env` is off, so this is off — and off is the
+    /// escalating net, which asks at the floor while a submission is fresh.
+    /// Turning it on trades that for the ceiling on the promise that the stream
+    /// makes a verdict prompt; a default of `true` would make that trade for an
+    /// operator who never asked for it, and behind anything that cuts long-held
+    /// requests it is a trade with nothing on the other side.
     #[test]
-    fn the_accelerator_flattens_the_net_it_replaces() {
+    fn the_default_leaves_the_net_escalating() {
         let min = std::time::Duration::from_secs(20);
         let max = std::time::Duration::from_secs(60);
+        let fresh = std::time::Duration::ZERO;
+        let escalate = std::time::Duration::from_secs(120);
 
         assert_eq!(
-            crate::schedule::interval(
-                DEFAULT_LONG_POLL_ENABLED,
-                std::time::Duration::ZERO,
-                min,
-                max,
-                std::time::Duration::from_secs(120),
-            ),
-            max,
-            "with the stream watching, the net is one request a minute rather than three"
+            crate::schedule::interval(DEFAULT_LONG_POLL_ENABLED, fresh, min, max, escalate),
+            min,
+            "a fresh submission is asked about at the floor unless somebody opted in"
         );
         assert_eq!(
-            crate::schedule::interval(
-                false,
-                std::time::Duration::ZERO,
-                min,
-                max,
-                std::time::Duration::from_secs(120),
-            ),
-            min,
-            "and without it, a fresh submission is asked about at the floor"
+            crate::schedule::interval(true, fresh, min, max, escalate),
+            max,
+            "and opting in is what flattens it to one request a minute"
         );
     }
 
