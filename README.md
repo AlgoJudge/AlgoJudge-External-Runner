@@ -137,7 +137,7 @@ is what lets one `.env` serve both.
 Pushing a `v*` tag publishes one image to GitHub's container registry:
 
 ```bash
-docker pull ghcr.io/algojudge/algojudge-external-runner:0.1.0
+docker pull ghcr.io/algojudge/algojudge-external-runner:0.1.1
 ```
 
 `0.1.0`, `0.1`, `0` and `latest` point at the same image; **a prerelease
