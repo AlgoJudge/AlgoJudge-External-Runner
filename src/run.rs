@@ -229,31 +229,21 @@ pub struct Runner<J: Judge> {
     pub cache: Arc<Cache>,
     pub judge: J,
     pub config: Config,
-    /// **Behind a lock, because four concurrent waits share it.** The lock is
-    /// never held across an await: every one of them reads what it needs, lets
-    /// go, makes its request, and takes it again to write. Holding it over a
-    /// request would put the archive's latency inside every other task.
+    /// **Shared by the three waits below, and never locked across an await:**
+    /// read what is needed, let go, make the request, take it again to write.
+    /// `std::sync::Mutex` and not the async one, so that holding it over an
+    /// await is a compile error rather than a stall nobody notices.
     pending: Mutex<Pending>,
-    /// Raised when a submission joins the set.
-    ///
-    /// **So the two tasks that only have work while something is outstanding
-    /// sleep rather than ask.** Without it, collecting and listening would each
-    /// wake on their own interval to find nothing, against somebody else's
-    /// service.
+    /// Raised when a submission joins the set, so the two tasks that have work
+    /// only while something is outstanding sleep instead of asking.
     arrived: Notify,
-    /// Raised when the judge's live channel says something about our account.
-    ///
-    /// One task hears the channel and another asks the archive; this is the
-    /// whole of what passes between them, because a stream that can drop events
-    /// may say *ask now* and must never say *here is the verdict*.
+    /// Raised when the judge's live channel mentions our account. It means
+    /// *ask now* and never *here is the verdict*: the channel drops events, so
+    /// a verdict read from it is a verdict that can be missed.
     sign: Notify,
-    /// Raised when the last outstanding submission has been answered for.
-    ///
-    /// **So the live channel is dropped the moment there is nothing to hear
-    /// about.** Without it, a request already in flight when the last verdict
-    /// landed would go on being held — and then re-made — for up to
-    /// `AJ_External__PollMaxSeconds` against somebody else's service, with
-    /// nothing outstanding to justify it.
+    /// Raised when the set empties, so the live channel is dropped at once
+    /// rather than held for the rest of `AJ_External__PollMaxSeconds` with
+    /// nothing left to hear about.
     settled: Notify,
 
     /// **Held rather than passed**, because the waits that have to hear it are
@@ -284,40 +274,26 @@ impl<J: Judge> Runner<J> {
 
     /// Runs until it is told to stop, and hands back what it was holding.
     ///
-    /// **Four waits, and they used to take turns.** One loop asked the Server
-    /// for work, then asked the judge about what was outstanding, then listened
-    /// to the judge's live stream — in that order, each blocking the next. The
-    /// first of those can be held open by the Server for the whole of
-    /// `AJ_Poll__WaitSeconds`, so a Runner with a submission at the archive
-    /// spent that time deaf: the verdict arrived in the stream and nobody was
-    /// listening. Measured 2026-09-08 against onlinejudge.org, which judged in
-    /// **2.1 to 3.1 seconds** while this Runner reported after **24 to 25** —
-    /// and the difference was the held claim, not the archive.
+    /// **Three waits, concurrent and not in turn.** Asking the Server for work
+    /// may be held open for `AJ_Poll__WaitSeconds`, so a task that waited there
+    /// before listening to the judge was deaf for that long with a submission
+    /// already at the archive. Keep them independent.
     ///
-    /// So they run concurrently. `try_join!` rather than `spawn`, deliberately:
-    /// every one of them is waiting on a socket, so what is needed is
-    /// concurrency and not parallelism — and this way nothing has to be `'static`,
-    /// nothing is cloned into a task, and a failure in any of them ends the
-    /// others by returning.
+    /// `try_join!` rather than `spawn`: all three wait on sockets, so what is
+    /// wanted is concurrency and not parallelism, and nothing has to be
+    /// `'static` or cloned into a task.
     ///
-    /// **Every job, not one.** The sandboxing Runner holds a single submission
-    /// and gives that one back; this Runner holds a pool of up to
-    /// `AJ_External__MaxPending`, and a lease left to expire costs each of those
-    /// participants the whole of it.
+    /// **Every job, not one.** This Runner holds a pool of up to
+    /// `AJ_External__MaxPending`, and a lease left to expire costs each of
+    /// those participants the whole of it.
     pub async fn work(&self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
         // Kept, so the report retry four calls down hears it too.
         let _ = self.stopping.set(stopping.clone());
 
-        // **Liveness on a timer of its own.** It used to be a threshold checked
-        // at the bottom of the loop, which was fine while an iteration was a
-        // second or two. A held claim made the iteration tens of seconds, so a
-        // sixty-second threshold fired every second pass — an effective beat of
-        // about a hundred and ten seconds against a Server that calls a Runner
-        // disconnected after a hundred and twenty.
-        //
-        // It also covers what the loop never could: this Runner spends most of
-        // its life waiting on somebody else's archive, and a cycle of that is
-        // not a moment it should have to remember to say it is alive in.
+        // **Liveness on a timer of its own**, because none of the three waits
+        // below is bounded by anything that would make a good heartbeat: the
+        // Server calls a Runner disconnected after a hundred and twenty seconds
+        // and a cycle of somebody else's archive can outlast that.
         let beating = heartbeat(Arc::clone(&self.server), stopping.clone());
 
         let outcome = tokio::try_join!(
@@ -347,10 +323,8 @@ impl<J: Judge> Runner<J> {
                 return Ok(());
             }
 
-            // **Full is a wait, not a spin.** The ceiling is a politeness to the
-            // archive about how much of its queue one installation occupies; the
-            // rate at which submissions arrive there is `SubmitMinIntervalSeconds`
-            // and is enforced elsewhere, so this is rarely reached.
+            // **Full is a wait, not a spin.** Rarely reached: what protects the
+            // archive is the gap between submissions, not this ceiling.
             if self.outstanding() >= self.config.external.max_pending {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -362,10 +336,6 @@ impl<J: Judge> Runner<J> {
             // Whether the Server held the last claim open, which decides
             // whether this task backs off before asking again.
             let mut held = false;
-
-            // **And not while stopping**, which the top of the loop cannot
-            // decide on its own: asking the judge about the pending set happens
-            // in between, and it is the slowest call this Runner makes.
 
             if !stopping.now() && self.outstanding() < self.config.external.max_pending {
                 let wait =
@@ -492,17 +462,13 @@ impl<J: Judge> Runner<J> {
 
     /// Asks the judge about everything outstanding, and reports what came back.
     ///
-    /// **Two deadlines, and only one of them the stream may hurry.** Collecting
-    /// is what the live channel exists to bring forward, so a sign pulls it to
-    /// now. Renewal keeps the interval's own cadence whatever the channel says:
-    /// `lease::ceiling` counts renewal cycles against
-    /// `AJ_External__PollMaxSeconds` to decide when the Server has been
-    /// unreachable for too long, so renewing every time an event arrived would
-    /// spend that whole budget in seconds and give a job up while its lease
-    /// still had twenty minutes left.
+    /// **Two deadlines, and the channel may hurry only one.** A sign pulls
+    /// collecting to now, which is what the channel is for. Renewal keeps the
+    /// interval's cadence: `lease::ceiling` counts renewal cycles against
+    /// `AJ_External__PollMaxSeconds`, so renewing on every event would spend
+    /// that budget in seconds and give a job up with the lease still valid.
     ///
-    /// Both start due, so the first pass after a submission does what the
-    /// single loop did at the top of its first turn.
+    /// Both start due, so the first pass after a submission acts at once.
     async fn collecting(&self, stopping: &Stopping) -> anyhow::Result<()> {
         let mut collect_at = Instant::now();
         let mut renew_at = Instant::now();
@@ -512,11 +478,9 @@ impl<J: Judge> Runner<J> {
                 return Ok(());
             }
 
-            // **Interest registered before the count is read**, because
-            // `notify_waiters` wakes whoever is already waiting and stores
-            // nothing for whoever is not. A submission landing between the
-            // read and the await would otherwise leave this task asleep with
-            // work outstanding, and nothing would wake it until the next one.
+            // **Registered before the count is read.** `notify_waiters` stores
+            // nothing for a task that is not yet waiting, so a submission
+            // landing in between would leave this one asleep with work to do.
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
@@ -550,9 +514,8 @@ impl<J: Judge> Runner<J> {
             let until = collect_at.saturating_duration_since(Instant::now());
             tokio::select! {
                 _ = tokio::time::sleep(until) => {}
-                // Asked now rather than at the top of the next interval: waking
-                // early and then waiting anyway would spend the accelerator on
-                // nothing.
+                // Now, not at the top of the next interval: waking early and
+                // then waiting anyway would spend the channel on nothing.
                 _ = self.sign.notified() => collect_at = Instant::now(),
                 _ = stopping.wait() => return Ok(()),
             }
@@ -561,21 +524,18 @@ impl<J: Judge> Runner<J> {
 
     /// Holds the judge's live channel open, and says when it fires.
     ///
-    /// **A task of its own, because it is a wait that must not queue behind
-    /// another.** It reports rather than collects: what a stream delivers may be
-    /// lossy, and a missed event would be a submission that hangs until it times
-    /// out. So this only ever says *ask now*.
+    /// **Its own task, because this wait must not queue behind another.** It
+    /// reports rather than collects: the channel is lossy, and a verdict read
+    /// from it could be a verdict missed, so it only ever says *ask now*.
     async fn listening(&self, stopping: &Stopping) -> anyhow::Result<()> {
         loop {
             if stopping.now() {
                 return Ok(());
             }
 
-            // **Interest registered before the count is read**, because
-            // `notify_waiters` wakes whoever is already waiting and stores
-            // nothing for whoever is not. A submission landing between the
-            // read and the await would otherwise leave this task asleep with
-            // work outstanding, and nothing would wake it until the next one.
+            // **Registered before the count is read.** `notify_waiters` stores
+            // nothing for a task that is not yet waiting, so a submission
+            // landing in between would leave this one asleep with work to do.
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
