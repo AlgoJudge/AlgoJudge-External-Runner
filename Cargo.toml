@@ -1,7 +1,7 @@
 [package]
 name = "algojudge-external-runner"
 description = "A Runner that forwards submissions to external judging systems and reports their verdicts. UVa Online Judge is the integration it has."
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.97"
 license = "MIT"

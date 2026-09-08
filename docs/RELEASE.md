@@ -169,6 +169,14 @@ Publishing the image at all is that decision, and it is not made here.
       **A digest says what it is and never what it is behind**, so this is a
       question to ask the registry rather than the file. Record the answer and
       the date whether or not anything moves.
+
+      **Asked on 2026-09-08, for 0.1.1.** The pinned Rust is **1.97.1**;
+      `rust:slim` moved to **1.98.0** on 2026-08-28, so the pin is one minor
+      behind. **Not moved, and deliberately**: the digest is shared with
+      `AlgoJudge-Runner` across six files in two repositories, and a patch
+      release carrying one behavioural fix is the wrong moment to change the
+      compiler for both. `gcr.io/distroless/static-debian13:nonroot` was
+      uploaded 2026-08-21 and is current.
 - [ ] Somebody has looked for advisories against `Cargo.lock`. **Nothing in this
       repository does it**: there is no `cargo audit` or `cargo deny` step in
       either workflow, none in `x`, no `deny.toml` and no Dependabot
@@ -177,6 +185,9 @@ Publishing the image at all is that decision, and it is not made here.
       what a release can claim.
       `scraper` is the one direct dependency whose requested range sits a full
       minor behind what exists upstream — `0.20`, against `0.22`.
+
+      **Run on 2026-09-08 for 0.1.1**: 245 crate dependencies against 1242
+      advisories, nothing found.
 - [ ] `.env.example` has been **read**, not just tested. The suite compares it
       against the source, and the comparison is narrower than it sounds:
       `every_variable_the_config_reads_is_in_the_example_and_no_others` in
@@ -194,7 +205,9 @@ Publishing the image at all is that decision, and it is not made here.
       2026-08-31; `uva@1`, `props.uva.problemNumber` and `onlinejudge.org` did
       not change, and are not what this is looking for. **The sweep for
       `AJ_Uva__`, `Runner-UVa` and `algojudge-runner-uva` came back empty on
-      2026-09-07**, tracked files and working tree alike.
+      2026-09-07**, tracked files and working tree alike, and again on
+      2026-09-08 — where the only hits are this checklist item describing the
+      sweep.
 - [ ] `git ls-files` lists `.env.example` and no `.env`. A real `.env` in the
       working tree is expected and ignored — do not open it, and do not let it
       into a commit or a log.
