@@ -66,7 +66,7 @@ already scale.
 | Registers as | `external: false` | **`external: true`** |
 | Trials | measures them | refuses them |
 | Runtime image | `Dockerfile`, distroless | `Dockerfile`, distroless and smaller |
-| Jobs held at once | one | up to `AJ_External__MaxPending`, 200 by default |
+| Jobs held at once | one | up to `AJ_External__MaxPending`, 100 by default |
 | Told to stop | gives its one job back | gives **every** held job back |
 
 **On `SIGTERM` every held job goes back to the queue**, and the process exits
@@ -86,9 +86,9 @@ killed with the process and sits out its lease instead, twenty minutes by
 default, before the Server reclaims it.
 
 Measured against a Server on the same host, 2026-09-08: about 750 ms before the
-first release, then **12 ms per job**. At the ceiling of 200 that is three
+first release, then **12 ms per job**. At the ceiling of 100 that is under two
 seconds inside a sixty-second grace. The margin is the point rather than the
-number: sixty seconds over 200 jobs allows 300 ms a call, so an installation
+number: sixty seconds over 100 jobs allows 600 ms a call, so an installation
 whose Server is remote, busy, or behind a proxy should raise the grace rather
 than assume our figure is theirs.
 
