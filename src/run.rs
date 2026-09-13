@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 use aj_protocol::stopping::Stopping;
-use aj_protocol::wire::{AttachToJob, ClaimedJob, Register, ReportResult};
+use aj_protocol::wire::{AttachToJob, ClaimedJob, LeaseRef, Register, ReportResult};
 use aj_protocol::{Backoff, Cache, Identity, Server};
 
 use crate::config::Config;
@@ -116,6 +116,30 @@ async fn wait_out(
     }
 
     stopping.sleep(delay).await
+}
+
+/// Refuses to start against a Server that does not know the batch routes.
+///
+/// **Asked with an empty batch, which costs the Server one query of
+/// nothing.** This Runner renews and gives work back only in batches, so a
+/// Server that answers 404 to them is one it cannot hold a lease against —
+/// and the symptom of finding that out later is a pool of leases quietly
+/// expiring while the process looks healthy. A half-updated stack should be
+/// a container that will not start.
+pub async fn refuse_a_server_that_cannot_batch(server: &Server) -> anyhow::Result<()> {
+    match server.renew_many(Vec::new(), None).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.not_found() => anyhow::bail!(
+            "this Server does not serve POST runner/jobs/leases, so it is older than the                  batch lease routes this Runner needs. Update the Server, or run a Runner from                  the release that matches it."
+        ),
+        // Anything else is the ordinary unreachable Server, which
+        // `admitted` has already waited out — so it is not this check's to
+        // decide, and starting is the right answer.
+        Err(e) => {
+            tracing::warn!(%e, "could not check the batch routes; carrying on");
+            Ok(())
+        }
+    }
 }
 
 /// Registered and holding a token, however long that takes.
@@ -275,12 +299,16 @@ impl<J: Judge> Runner<J> {
 
     /// Runs until it is told to stop, and hands back what it was holding.
     ///
-    /// Three waits, concurrent rather than in turn: asking the Server for work
+    /// Four waits, concurrent rather than in turn: asking the Server for work
     /// may be held open for `AJ_Poll__WaitSeconds`, and a task that waited there
     /// before listening to the judge was deaf for that long with a submission
     /// already at the archive.
     ///
-    /// `try_join!` rather than `spawn`: all three wait on sockets, so nothing
+    /// **Renewing is one of the four rather than a branch inside collecting**,
+    /// so holding the lease is not delayed by asking the judge, and asking the
+    /// judge less often does not hold the lease less often.
+    ///
+    /// `try_join!` rather than `spawn`: all four wait on sockets, so nothing
     /// needs to be `'static` or cloned into a task.
     pub async fn work(&self, identity: &Identity, stopping: &Stopping) -> anyhow::Result<()> {
         // Kept, so the report retry four calls down hears it too.
@@ -294,6 +322,7 @@ impl<J: Judge> Runner<J> {
         let outcome = tokio::try_join!(
             self.intake(identity, stopping),
             self.collecting(stopping),
+            self.renewing(stopping),
             self.listening(stopping),
         );
 
@@ -454,15 +483,13 @@ impl<J: Judge> Runner<J> {
 
     /// Asks the judge about everything outstanding, and reports what came back.
     ///
-    /// Two deadlines. A sign from the channel pulls collecting forward;
-    /// renewal keeps the interval's cadence, because `lease::ceiling` counts
-    /// renewal cycles against `AJ_External__PollMaxSeconds` and renewing on
-    /// every event would spend that budget in seconds.
+    /// One deadline, and a sign from the channel pulls it forward. Holding the
+    /// leases is `renewing`'s, on a cadence of its own — this loop's interval is
+    /// about being polite to somebody else's service and nothing else.
     ///
-    /// Both start due, so the first pass after a submission acts at once.
+    /// It starts due, so the first pass after a submission acts at once.
     async fn collecting(&self, stopping: &Stopping) -> anyhow::Result<()> {
         let mut collect_at = Instant::now();
-        let mut renew_at = Instant::now();
 
         loop {
             if stopping.now() {
@@ -489,19 +516,12 @@ impl<J: Judge> Runner<J> {
             tokio::pin!(sign);
             sign.as_mut().enable();
 
-            let now = Instant::now();
-            if now >= renew_at {
-                self.renew_everything().await;
-                renew_at = Instant::now() + self.cycle();
-            }
-            if now >= collect_at {
+            if Instant::now() >= collect_at {
                 self.harvest().await;
                 self.expire().await;
                 collect_at = Instant::now() + self.cycle();
             }
 
-            // After both: renewal drops entries too, so the set can empty
-            // without the collect branch running.
             if self.outstanding() == 0 {
                 self.settled.notify_waiters();
             }
@@ -510,9 +530,7 @@ impl<J: Judge> Runner<J> {
                 return Ok(());
             }
 
-            let until = collect_at
-                .min(renew_at)
-                .saturating_duration_since(Instant::now());
+            let until = collect_at.saturating_duration_since(Instant::now());
             tokio::select! {
                 _ = tokio::time::sleep(until) => {}
                 // Now, not at the top of the next interval: waking early and
@@ -521,6 +539,39 @@ impl<J: Judge> Runner<J> {
                 _ = stopping.wait() => return Ok(()),
             }
         }
+    }
+
+    /// Holds every lease this Runner has, on a cadence of its own.
+    ///
+    /// A quarter of the granted lease, which leaves three failures of slack —
+    /// the rule `keeper.rs` uses in the sandboxing Runner. It is deliberately
+    /// unrelated to how often the judge is asked: those are politeness towards
+    /// somebody else's service, and this is whether the Server still believes
+    /// this Runner is alive.
+    async fn renewing(&self, stopping: &Stopping) -> anyhow::Result<()> {
+        let every = lease::interval(self.config.lease_granted());
+
+        loop {
+            // **After the interval, not before it.** A claim has just granted a
+            // full lease; renewing at once would spend a request saying so.
+            if !stopping.sleep(every).await {
+                return Ok(());
+            }
+            if self.outstanding() == 0 {
+                continue;
+            }
+            self.renew_everything().await;
+        }
+    }
+
+    /// Everything this Runner is waiting on, as the two batch calls need it.
+    fn held(&self) -> Vec<(i64, String, String)> {
+        self.pending
+            .lock()
+            .expect("the pending lock")
+            .iter()
+            .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
+            .collect()
     }
 
     /// Holds the judge's live channel open, and says when it fires.
@@ -592,28 +643,43 @@ impl<J: Judge> Runner<J> {
     /// land, and the job is already re-forwarded by whoever claims it next.
     /// What changes is when — now, rather than when the lease expires.
     async fn give_everything_back(&self) {
-        let held: Vec<(i64, String, String)> = self
-            .pending
-            .lock()
-            .expect("the pending lock")
+        let held = self.held();
+        if held.is_empty() {
+            return;
+        }
+
+        let asked: Vec<LeaseRef> = held
             .iter()
-            .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
+            .map(|(_, job_id, token)| LeaseRef {
+                job_id: job_id.clone(),
+                lease_token: token.clone(),
+            })
             .collect();
 
-        for (sid, job_id, token) in held {
-            // A refusal here is not a failure to report. The one that matters
-            // says the lease is gone, which means the Server has already put the
-            // job back — the outcome this was asking for.
-            match self.server.release(&job_id, &token).await {
-                Ok(()) => tracing::info!(job = %job_id, sid, "gave the job back"),
-                Err(e) if e.lease_lost() => {
-                    tracing::info!(job = %job_id, sid, "the job was already back")
+        // **One request, whatever the pool holds.** One call a job was a race
+        // against the platform's stop grace, and whatever lost it sat out its
+        // lease instead — on a Runner that was already gone.
+        match self.server.release_many(asked).await {
+            Ok(answered) => {
+                for one in &answered.results {
+                    match one.code.as_deref() {
+                        // Every refusal here means the job is already back,
+                        // which is what this was asking for.
+                        Some(code) => {
+                            tracing::info!(job = %one.job_id, code, "the job was already back")
+                        }
+                        None => tracing::info!(job = %one.job_id, "gave the job back"),
+                    }
                 }
-                Err(e) => tracing::warn!(
-                    job = %job_id, sid, %e,
-                    "could not give the job back; it returns when the lease expires",
-                ),
             }
+            Err(e) => tracing::warn!(
+                %e,
+                held = held.len(),
+                "could not give the jobs back; they return when their leases expire",
+            ),
+        }
+
+        for (sid, _, _) in held {
             self.pending.lock().expect("the pending lock").take(sid);
         }
     }
@@ -969,31 +1035,62 @@ impl<J: Judge> Runner<J> {
         }
     }
 
+    /// Renews every held lease in **one** request.
+    ///
     /// Renewed unconditionally, because renewal never shortens a lease.
-    async fn renew_everything(&self) {
-        let held: Vec<(i64, String, String)> = self
-            .pending
-            .lock()
-            .expect("the pending lock")
-            .iter()
-            .map(|(sid, entry)| (sid, entry.job_id.clone(), entry.lease_token.clone()))
-            .collect();
-        let ceiling = lease::ceiling(self.config.lease_seconds, self.config.external.poll_max);
+    ///
+    /// **Public so a test can drive one cycle** rather than wait out a quarter
+    /// of a lease for each of them — the production path, on the production
+    /// decision, without a second implementation beside it.
+    ///
+    /// **The answer is read per job, not as one verdict.** The give-up budget is
+    /// counted on the entry, so folding a batch into a single standing would
+    /// spend the whole pool's budget on one blip — the defect `Pending::renewal`
+    /// was given a per-entry counter to stop.
+    pub async fn renew_everything(&self) {
+        let held = self.held();
+        if held.is_empty() {
+            return;
+        }
+
+        let ceiling = lease::ceiling(
+            self.config.lease_seconds,
+            lease::interval(self.config.lease_granted()).as_secs(),
+        );
         let mut giving_up: Vec<(i64, u32)> = Vec::new();
 
-        for (sid, job_id, token) in held {
-            // Success is an answer like any other, so it goes through the same
-            // decision rather than short-circuiting past it.
-            let standing = match self
-                .server
-                .renew(&job_id, &token, Some(self.config.lease_seconds))
-                .await
-            {
-                Ok(_) => Standing::Held,
-                Err(e) => {
-                    tracing::warn!(%e, job = %job_id, "the lease was not renewed");
-                    Standing::of(&e)
-                }
+        let asked: Vec<LeaseRef> = held
+            .iter()
+            .map(|(_, job_id, token)| LeaseRef {
+                job_id: job_id.clone(),
+                lease_token: token.clone(),
+            })
+            .collect();
+
+        // A refusal of the request itself says nothing about any one job, so
+        // every entry hears the same thing: the Server could not be reached.
+        let answered = match self
+            .server
+            .renew_many(asked, Some(self.config.lease_seconds))
+            .await
+        {
+            Ok(answered) => answered
+                .results
+                .into_iter()
+                .map(|one| (one.job_id, one.code))
+                .collect::<std::collections::HashMap<_, _>>(),
+            Err(e) => {
+                tracing::warn!(%e, held = held.len(), "the leases were not renewed");
+                std::collections::HashMap::new()
+            }
+        };
+
+        for (sid, job_id, _) in held {
+            // A job the answer says nothing about is one this Runner could not
+            // hear about, which is the unreachable reading rather than a loss.
+            let standing = match answered.get(&job_id) {
+                Some(code) => lease::Standing::of_code(code.as_deref()),
+                None => Standing::Unreachable,
             };
             let consecutive = self
                 .pending

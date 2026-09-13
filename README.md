@@ -67,16 +67,19 @@ already scale.
 | Trials | measures them | refuses them |
 | Runtime image | `Dockerfile`, distroless | `Dockerfile`, distroless and smaller |
 | Jobs held at once | one | up to `AJ_External__MaxPending`, 100 by default |
-| Told to stop | gives its one job back | gives **every** held job back |
+| Told to stop | gives its one job back | gives **every** held job back, in one call |
+| Holds the leases | a task per job, a quarter of the lease | one task, one call, a quarter of the lease |
 
-**On `SIGTERM` every held job goes back to the queue**, and the process exits
-without reporting on any of them: the platform is taking their Runner away, and
-nothing was wrong with the submissions. What cannot go back is the submission
-already sitting on the archive under this installation's account, so the answer
-still coming from there arrives with nowhere to land and whoever claims the job
-next sends the same solution again. That is what a restart has always cost; what
-a polite stop saves is the lease each of those jobs would otherwise have sat
-out.
+**On `SIGTERM` every held job goes back to the queue in a single request**, and
+the process exits without reporting on any of them: the platform is taking their
+Runner away, and nothing was wrong with the submissions. One request rather than
+one a job is what keeps a stop inside the grace the platform allows however
+large the pool is; what is not given back sits out its lease instead. What
+cannot go back at all is the submission already on the archive under this
+installation's account, so the answer still coming from there arrives with
+nowhere to land and whoever claims the job next sends the same solution again.
+That is what a restart has always cost; what a polite stop saves is the lease
+each of those jobs would otherwise have sat out.
 
 **`external: true` is not a detail.** The Server pairs a problem with a Runner on
 that flag and the problem's own, by equality — so a Runner that forwards and does
@@ -214,13 +217,6 @@ are the refusals an operator meets:
 - **`AJ_Lease__RequestSeconds` must exceed `AJ_External__PendingTimeoutSeconds`.**
   Otherwise the Server reclaims the job while this Runner is still waiting on the
   judge, and the next Runner to claim it submits the same solution again.
-- **`AJ_External__PollMaxSeconds` *plus* `AJ_Poll__WaitSeconds` must fit four
-  times inside the lease.** A held lease is renewed once per cycle, and the cycle
-  is both of those: the judge's interval, and the claim the Server may hold. With
-  the defaults that leaves 275 seconds for the judge's interval, not 300 — the
-  refusal names the arithmetic it did. Slowing the polling down to be polite to
-  somebody else's service slows the renewing down with it, and a lease that
-  expires between two renewals is the same double submission by another route.
 - **`AJ_Lease__RequestSeconds` may not exceed 3600.** The Server clamps what it
   grants, so a larger request is a deadline of this Runner's own invention: it
   would renew against a lease it does not have and hold a job past the real one.

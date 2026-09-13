@@ -56,6 +56,23 @@
 //! AJ_TEST_SERVER=http://host.docker.internal:8098/api/v1 \
 //!   ./x test --test lease -- --include-ignored --nocapture
 //! ```
+//!
+//! # Give it a Server whose queue is empty
+//!
+//! **Run it twice against one Server and the third run fails**, saying the job
+//! was taken back at 100s. Measured 2026-09-13, three runs in a row on one
+//! Server: ok, ok, failed - and the same three runs with the batch renewal
+//! reverted behave identically, so it is this harness rather than the loop.
+//!
+//! Each run leaves its own job behind: the Runner is aborted rather than
+//! stopped, so what it held returns to the queue and the next run claims it.
+//! **And the archive stand-in answers with one fixed `sid`** while `Pending` is
+//! keyed on `sid`, so the second job overwrites the first - the Runner then
+//! holds two jobs on the Server and renews one. The one it forgot is this
+//! test's, and it dies on exactly the deadline it was granted.
+//!
+//! None of that reaches production, where every submission has a `sid` of its
+//! own. `docker compose down -v` before each run, and it passes every time.
 
 mod stack;
 

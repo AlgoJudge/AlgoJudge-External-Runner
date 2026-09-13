@@ -198,8 +198,13 @@ async fn server_handing_out(mock: &MockServer, job_body: String, renew: Response
         .mount(mock)
         .await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/runner/jobs/job-1/lease"))
+        .and(path("/api/v1/runner/jobs/leases"))
         .respond_with(renew)
+        .mount(mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/releases"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"results":[]}"#))
         .mount(mock)
         .await;
     Mock::given(method("POST"))
@@ -230,15 +235,18 @@ async fn server_handing_out(mock: &MockServer, job_body: String, renew: Response
         .await;
 }
 
-/// A renewal the Server granted. **Every field `Lease` carries**: a short body
-/// parses as an error, the loop reads that as the Server being unreachable, and
-/// with a ceiling of zero the job is given up before `harvest` ever sees a
-/// verdict — which is how the first draft of this file "passed" the give-up test
-/// and failed the other three.
-fn renewed() -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_string(
-        r#"{"jobId":"job-1","leaseToken":"token-1","leaseExpiresAt":"2026-08-31T12:00:00Z"}"#,
-    )
+/// A batch renewal the Server granted, for the jobs named.
+///
+/// **An item per job, and an absent `code` is what says it worked.** A body that
+/// leaves a held job out is read as a Server that could not be heard from about
+/// it, which spends give-up budget — so a mock that answers `{"results":[]}` to
+/// a Runner holding something is testing the unreachable path by accident.
+fn renewed_batch(job_ids: &[&str]) -> ResponseTemplate {
+    let items: Vec<String> = job_ids
+        .iter()
+        .map(|job_id| format!(r#"{{"jobId":"{job_id}","leaseExpiresAt":"2026-08-31T12:00:00Z"}}"#))
+        .collect();
+    ResponseTemplate::new(200).set_body_string(format!(r#"{{"results":[{}]}}"#, items.join(",")))
 }
 
 /// `who` names the test, because each needs an identity and a cache of its own:
@@ -350,20 +358,24 @@ async fn server_handing_out_two(mock: &MockServer) {
         .mount(mock)
         .await;
 
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/leases"))
+        .respond_with(renewed_batch(&["job-1", "job-2"]))
+        .mount(mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/releases"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"results":[{"jobId":"job-1"},{"jobId":"job-2"}]}"#),
+        )
+        .mount(mock)
+        .await;
+
     for job_id in ["job-1", "job-2"] {
         Mock::given(method("POST"))
             .and(path(format!("/api/v1/runner/jobs/{job_id}/progress")))
             .respond_with(ResponseTemplate::new(204))
-            .mount(mock)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(format!("/api/v1/runner/jobs/{job_id}/release")))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(mock)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(format!("/api/v1/runner/jobs/{job_id}/lease")))
-            .respond_with(renewed())
             .mount(mock)
             .await;
         // Mounted although nothing should ever post it: an unmatched request is
@@ -401,6 +413,41 @@ async fn run_for(config: algojudge_external_runner::config::Config, how_long: Du
     tokio::time::sleep(how_long).await;
     working.abort();
     let _ = working.await;
+}
+
+/// Runs the loop and keeps a handle on the Runner itself.
+///
+/// For the one test that has to drive a renewal cycle by hand: renewal is on a
+/// quarter of the granted lease, and the shortest lease the Server grants makes
+/// that fifteen seconds a cycle.
+fn running(
+    config: algojudge_external_runner::config::Config,
+) -> (
+    Arc<algojudge_external_runner::run::Runner<algojudge_external_runner::uva::Uva>>,
+    tokio::task::JoinHandle<()>,
+    aj_protocol::stopping::Teller,
+) {
+    let identity = aj_protocol::Identity::load_or_create(&config.key_path).expect("an identity");
+    let server = aj_protocol::Server::new(&config.server_base_url).expect("a Server");
+    let cache = Arc::new(aj_protocol::Cache::new(
+        std::path::PathBuf::from(&config.cache_path),
+        config.cache_max_bytes,
+        identity.fingerprint(),
+    ));
+    let judge = judge(&config);
+    let runner = Arc::new(algojudge_external_runner::run::Runner::new(
+        Arc::new(server),
+        cache,
+        judge,
+        config,
+    ));
+
+    let working = Arc::clone(&runner);
+    let (stopping, teller) = aj_protocol::stopping::Stopping::told();
+    let task = tokio::spawn(async move {
+        let _ = working.work(&identity, &stopping).await;
+    });
+    (runner, task, teller)
 }
 
 /// Runs the loop, tells it to stop, and waits for it to return **on its own**.
@@ -674,11 +721,30 @@ async fn a_job_given_up_on_is_reported_and_not_dropped() {
     )
     .await;
 
-    run_for(
-        probe_config("given-up", &mock.uri(), &site.uri(), &hunt.uri()),
-        Duration::from_millis(1500),
-    )
-    .await;
+    // **Driven by hand, three cycles.** The ceiling is a quarter of the lease
+    // three times over, and the shortest lease the Server grants makes each of
+    // those fifteen seconds — so waiting them out would be a forty-five-second
+    // test of arithmetic this calls directly instead.
+    let (runner, task, _teller) = running(probe_config(
+        "given-up",
+        &mock.uri(),
+        &site.uri(),
+        &hunt.uri(),
+    ));
+
+    // Held once the job has been forwarded, which the progress note marks.
+    for _ in 0..200 {
+        if !posted_to(&mock.received_requests().await.unwrap(), "/progress").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    for _ in 0..3 {
+        runner.renew_everything().await;
+    }
+    task.abort();
+    let _ = task.await;
 
     let sent = mock.received_requests().await.unwrap();
     let reports = posted_to(&sent, "/report");
@@ -767,7 +833,7 @@ async fn a_failure_says_whether_asking_again_could_help() {
                 r#"{"languages":[]}"#,
                 r#"{"uva":{"problemNumber":100}}"#,
             ),
-            renewed(),
+            renewed_batch(&["job-1"]),
         )
         .await;
 
@@ -859,29 +925,30 @@ async fn told_to_stop_it_hands_back_every_job_it_is_holding() {
     .await;
 
     let sent = mock.received_requests().await.unwrap();
-    let released: Vec<(String, String)> = sent
-        .iter()
-        .filter(|r| r.url.path().ends_with("/release"))
-        .map(|r| {
-            (
-                r.url.path().to_owned(),
-                String::from_utf8_lossy(&r.body).into_owned(),
-            )
-        })
-        .collect();
+    let released = posted_to(&sent, "/jobs/releases");
 
-    assert_eq!(released.len(), 2, "both go back, not one: {released:?}");
+    // **One request, not one a job.** That is the whole of this change: a stop
+    // used to be a serial fan of calls racing the platform's grace period, and
+    // whatever lost that race sat out its lease on a Runner already gone.
+    assert_eq!(
+        released.len(),
+        1,
+        "the pool goes back in one call, not {}: {released:?}",
+        released.len(),
+    );
+
     for job_id in ["job-1", "job-2"] {
-        let found = released
-            .iter()
-            .find(|(path, _)| path.ends_with(&format!("/{job_id}/release")))
-            .unwrap_or_else(|| panic!("{job_id} was not given back: {released:?}"));
+        assert!(
+            released[0].contains(job_id),
+            "{job_id} was not in the batch: {}",
+            released[0],
+        );
         // The lease it is holding, not a blank: the Server refuses a release
         // that cannot prove the job is this Runner's.
         assert!(
-            found.1.contains(&format!("token-for-{job_id}")),
+            released[0].contains(&format!("token-for-{job_id}")),
             "{job_id} was released without its lease: {}",
-            found.1,
+            released[0],
         );
     }
 
@@ -1016,7 +1083,7 @@ async fn an_event_about_our_account_is_answered_without_waiting_for_the_interval
         ),
         // A renewal that works, so that what this test measures is the stream
         // and not a Runner giving a job back.
-        renewed(),
+        renewed_batch(&["job-1"]),
     )
     .await;
 
@@ -1039,4 +1106,145 @@ async fn an_event_about_our_account_is_answered_without_waiting_for_the_interval
         "the report is not a verdict at all: {}",
         reports[0]
     );
+}
+
+/// **One item in a batch answer decides one job, and nothing else.**
+///
+/// The give-up budget is counted on the entry, so folding a batch into a single
+/// standing would spend a whole pool's worth of it on one blip — the defect a
+/// per-entry counter was added to stop, reachable again the moment renewal
+/// became one request.
+#[tokio::test]
+async fn a_stale_job_in_a_batch_answer_is_dropped_and_its_neighbour_kept() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive_naming(&site, &[SID, SID + 1]).await;
+    uhunt(&hunt, 0).await;
+    server_handing_out_two(&mock).await;
+
+    // **Priority, not mount order.** Two mocks match this path and wiremock
+    // picks by priority first; without this the helper's own "both renewed"
+    // answers, and the test passes on the wrong reading.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/leases"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"results":[{"jobId":"job-1","leaseExpiresAt":"2026-08-31T12:00:00Z"},
+                 {"jobId":"job-2","code":"runner.lease.stale"}]}"#,
+        ))
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+
+    let (runner, task, teller) = running(probe_config(
+        "stale-one",
+        &mock.uri(),
+        &site.uri(),
+        &hunt.uri(),
+    ));
+
+    // Both held, which the two progress notes mark.
+    for _ in 0..400 {
+        if posted_to(&mock.received_requests().await.unwrap(), "/progress").len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    runner.renew_everything().await;
+
+    // Stopped for real, so the release comes out of the loop's own shutdown
+    // rather than out of a call this test made.
+    teller.stop();
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("a loop that ignored the word")
+        .expect("the loop");
+
+    let sent = mock.received_requests().await.unwrap();
+    let released = posted_to(&sent, "/jobs/releases");
+    assert_eq!(
+        released.len(),
+        1,
+        "one call, whatever is left: {released:?}"
+    );
+
+    assert!(
+        released[0].contains("job-1"),
+        "the job that is still ours was not given back: {}",
+        released[0],
+    );
+    assert!(
+        !released[0].contains("job-2"),
+        "a job another Runner holds was given back anyway: {}",
+        released[0],
+    );
+
+    // Dropped, not reported: somebody else has it, and a result against a stale
+    // lease would be an older answer overwriting a newer attempt.
+    assert!(
+        posted_to(&sent, "/report").is_empty(),
+        "a job another Runner holds was reported on",
+    );
+}
+
+/// **The leases are held on a timer of their own.**
+///
+/// Renewal used to ride the judge-polling cycle, so it fired as a side effect of
+/// asking the archive. It is a task now, and if it were not joined nothing would
+/// renew at all — a Runner that looks healthy and quietly loses every lease.
+///
+/// Slow on purpose: a quarter of the shortest lease the Server grants is fifteen
+/// seconds, and waiting one of them is the only way to see the timer.
+#[tokio::test]
+async fn the_leases_are_renewed_on_a_timer_of_their_own() {
+    let mock = MockServer::start().await;
+    let site = MockServer::start().await;
+    let hunt = MockServer::start().await;
+    archive_naming(&site, &[SID, SID + 1]).await;
+    uhunt(&hunt, 0).await;
+    server_handing_out_two(&mock).await;
+
+    run_for(
+        probe_config("own-timer", &mock.uri(), &site.uri(), &hunt.uri()),
+        Duration::from_secs(17),
+    )
+    .await;
+
+    let renewed = posted_to(&mock.received_requests().await.unwrap(), "/jobs/leases");
+    assert!(
+        !renewed.is_empty(),
+        "nothing renewed in seventeen seconds, so no timer is running",
+    );
+    // One request for the pool, not one a job.
+    assert!(
+        renewed[0].contains("job-1") && renewed[0].contains("job-2"),
+        "the pool was not renewed in one call: {}",
+        renewed[0],
+    );
+}
+
+/// **A Server too old to batch stops the Runner rather than being worked
+/// around.**
+///
+/// This Runner renews and gives work back only in batches, so a Server that does
+/// not serve them is one it cannot hold a lease against. Finding that out after
+/// claiming is a pool of leases expiring behind a process that looks healthy.
+#[tokio::test]
+async fn a_server_that_cannot_batch_is_refused_at_the_door() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/runner/jobs/leases"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mock)
+        .await;
+
+    let server = aj_protocol::Server::new(&format!("{}/api/v1", mock.uri())).expect("a Server");
+    let refused = algojudge_external_runner::run::refuse_a_server_that_cannot_batch(&server)
+        .await
+        .expect_err("an older Server must not be started against");
+
+    let said = refused.to_string();
+    assert!(said.contains("runner/jobs/leases"), "{said}");
+    assert!(said.contains("Update the Server"), "{said}");
 }

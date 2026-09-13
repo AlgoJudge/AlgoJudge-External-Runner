@@ -35,6 +35,9 @@ pub const POLL_FLOOR_SECONDS: u64 = 20;
 /// `ClaimedJob::lease_expires_at`: *the granted deadline is authoritative, and a
 /// Runner that renews on its own arithmetic renews on a number the Server never
 /// agreed to*. Read off `AlgoJudge-Server` on 2026-08-31.
+/// The floor the Server clamps `leaseSeconds` up to.
+pub const SERVER_LEASE_FLOOR_SECONDS: u32 = 60;
+
 pub const SERVER_LEASE_CEILING_SECONDS: u32 = 3600;
 
 /// The longest a Server will hold a `claim` open, whatever `waitSeconds` asks.
@@ -283,6 +286,18 @@ impl Config {
     ///
     /// **This said "the three ways" while there were five**, which is the shape
     /// a count in prose always ends up in. There is no number here now.
+    /// The lease the Server will actually grant, clamped as its contract clamps.
+    ///
+    /// Renewal is timed against this rather than against what was asked for: a
+    /// Runner asking for less than the floor is granted the floor anyway, and
+    /// renewing on the smaller number would be calls for nothing.
+    pub fn lease_granted(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(
+            self.lease_seconds
+                .clamp(SERVER_LEASE_FLOOR_SECONDS, SERVER_LEASE_CEILING_SECONDS),
+        ))
+    }
+
     fn refuse_what_cannot_work(&self) -> anyhow::Result<()> {
         if self.external.poll_min < POLL_FLOOR_SECONDS {
             bail!(
@@ -338,44 +353,6 @@ impl Config {
                  Runner to claim it would submit the same solution again.",
                 self.lease_seconds,
                 self.external.pending_timeout
-            );
-        }
-        // **Renewal rides on this cadence.** A held lease is renewed at the top
-        // of the same cycle that asks the judge, so the slowest poll interval
-        // is also the slowest renewal. An operator being polite to somebody
-        // else's service by raising this — the obvious, well-meant change —
-        // stretches the renewal interval with it, and a lease that expires
-        // between two renewals is reclaimed, claimed by another Runner, and
-        // **the same solution is submitted a second time**. That is the failure
-        // this Runner's lease handling exists to prevent, reachable through
-        // configuration alone, with nothing in any log to say it happened.
-        //
-        // Four, matching the keeper in `AlgoJudge-Runner`: three renewals fit
-        // inside every lease, so two may fail in a row with the deadline still
-        // comfortably ahead.
-        //
-        // **And the claim is part of that cycle.** `renew_everything` runs at
-        // the top of the loop, and the loop's other blocking call is the claim,
-        // which the Server may hold for the whole of `poll_wait`. Counting the
-        // judge's interval alone made the check name the wrong number: a
-        // perfectly polite `AJ_External__PollMaxSeconds` passed while the
-        // renewal gap it was guarding was a claim longer than the lease.
-        let cycle = self
-            .external
-            .poll_max
-            .saturating_add(self.poll_wait.min(SERVER_MAX_WAIT_SECONDS));
-        if cycle.saturating_mul(4) > u64::from(self.lease_seconds) {
-            bail!(
-                "AJ_External__PollMaxSeconds of {} and AJ_Poll__WaitSeconds of {} make a \
-                 cycle of {cycle} seconds, which does not fit four times inside \
-                 AJ_Lease__RequestSeconds of {}. A lease is renewed once per cycle and \
-                 both of those are inside one — so this lease could expire between two \
-                 renewals, and the next Runner to claim the job would submit the same \
-                 solution again. Lower either interval, or raise the lease (the Server \
-                 clamps it at 3600).",
-                self.external.poll_max,
-                self.poll_wait,
-                self.lease_seconds
             );
         }
         if self.external.max_pending == 0 {
@@ -730,29 +707,6 @@ mod tests {
     /// fit inside it — while the renewal gap was a claim longer than the lease
     /// it was renewing. The next Runner to claim the job submits the same
     /// solution to somebody else's site.
-    #[test]
-    fn a_claim_the_server_holds_counts_towards_the_renewal_cycle() {
-        let mut config = base();
-        config.lease_seconds = 240;
-        config.external.pending_timeout = 120;
-        config.external.poll_max = 60;
-
-        // The judge's own interval fits four times over, which is all the check
-        // used to ask.
-        config.poll_wait = 0;
-        config
-            .refuse_what_cannot_work()
-            .expect("four minutes holds four one-minute cycles");
-
-        config.poll_wait = SERVER_MAX_WAIT_SECONDS;
-        let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
-        assert!(refused.contains("WaitSeconds"), "{refused}");
-        assert!(
-            refused.contains("submit the same solution again"),
-            "{refused}"
-        );
-    }
-
     /// **The ceiling was prose, and asking past it made things worse silently.**
     ///
     /// Not merely ignored: the loop tells a held claim from an immediate answer
@@ -790,33 +744,35 @@ mod tests {
         );
     }
 
-    /// **The well-meant change that would have cost a double submission.**
+    /// **Polling and the lease are independent, and this is what says so.**
     ///
-    /// Renewal happens once per cycle, so an operator slowing the polling down
-    /// to be kind to somebody else's service slows the renewing down with it.
-    /// At two hundred and seventy-five seconds against a twenty-minute lease
-    /// there is still room; at six hundred there is not, and nothing about the
-    /// failure would point here.
+    /// Renewal used to ride the judge-polling cycle, so an operator being kind
+    /// to somebody else's service by polling it less often stretched the
+    /// interval at which the lease was held — reachable by configuration alone,
+    /// with nothing in any log to say it happened, and answered by a start-up
+    /// refusal that tied the two settings together.
     ///
-    /// **Two hundred and seventy-five rather than three hundred**, because the
-    /// cycle is the judge's interval *plus* the claim the Server holds open, and
-    /// the default claim is twenty-five seconds. The old boundary counted the
-    /// first and not the second.
+    /// Renewal has its own timer now, a quarter of the granted lease, so the
+    /// refusal is gone and these combinations are ordinary. Putting the coupling
+    /// back would fail here.
     #[test]
-    fn a_poll_interval_that_does_not_fit_inside_the_lease_is_refused() {
+    fn a_slow_poll_interval_no_longer_touches_the_lease() {
         let mut config = base();
-        config.external.poll_max = 300 - config.poll_wait;
+
+        // Ten minutes between asks, against a twenty-minute lease: once the
+        // whole of the reason for the old refusal.
+        config.external.poll_max = 600;
+        config.poll_wait = SERVER_MAX_WAIT_SECONDS;
         config
             .refuse_what_cannot_work()
-            .expect("four times three hundred fits inside twenty minutes");
+            .expect("polling slowly is not a lease problem any more");
 
-        config.external.poll_max = 600;
-        let refused = config.refuse_what_cannot_work().unwrap_err().to_string();
-        assert!(refused.contains("PollMaxSeconds"), "{refused}");
-        assert!(
-            refused.contains("submit the same solution again"),
-            "{refused}"
-        );
+        // And the other direction: a short lease with a long poll.
+        config.lease_seconds = 240;
+        config.external.pending_timeout = 120;
+        config
+            .refuse_what_cannot_work()
+            .expect("the two settings no longer constrain each other");
     }
 
     #[test]
