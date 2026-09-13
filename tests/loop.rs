@@ -732,13 +732,23 @@ async fn a_job_given_up_on_is_reported_and_not_dropped() {
         &hunt.uri(),
     ));
 
-    // Held once the job has been forwarded, which the progress note marks.
-    for _ in 0..200 {
-        if !posted_to(&mock.received_requests().await.unwrap(), "/progress").is_empty() {
+    // **Waited for on the pool, not on a request.** `progress` is sent before
+    // the entry is inserted, so waiting for that call leaves a window in which
+    // the pool is still empty — and a renewal on an empty pool is a no-op that
+    // spends none of the give-up budget. Thirty seconds because a loaded CI
+    // runner is slower than this machine, and asserted so that running out says
+    // so instead of failing three lines later for a reason that is not the one.
+    for _ in 0..1200 {
+        if runner.outstanding() > 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    assert_eq!(
+        runner.outstanding(),
+        1,
+        "the job never reached the pool, so there was nothing to give up on",
+    );
 
     for _ in 0..3 {
         runner.renew_everything().await;
@@ -1143,13 +1153,19 @@ async fn a_stale_job_in_a_batch_answer_is_dropped_and_its_neighbour_kept() {
         &hunt.uri(),
     ));
 
-    // Both held, which the two progress notes mark.
-    for _ in 0..400 {
-        if posted_to(&mock.received_requests().await.unwrap(), "/progress").len() >= 2 {
+    // On the pool rather than on the progress notes, for the reason the give-up
+    // test gives: the note is sent before the entry is inserted.
+    for _ in 0..1200 {
+        if runner.outstanding() >= 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    assert_eq!(
+        runner.outstanding(),
+        2,
+        "both jobs have to be held for this to mean anything"
+    );
 
     runner.renew_everything().await;
 

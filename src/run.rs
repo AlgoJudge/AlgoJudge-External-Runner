@@ -626,7 +626,12 @@ impl<J: Judge> Runner<J> {
     }
 
     /// How many submissions the judge still owes an answer for.
-    fn outstanding(&self) -> usize {
+    /// How many submissions the archive has not answered for yet.
+    ///
+    /// **Public so a test can wait for the pool rather than for a request.**
+    /// `progress` is sent before the entry is inserted, so a test that waits for
+    /// that call and then acts has a window in which the pool is still empty.
+    pub fn outstanding(&self) -> usize {
         self.pending.lock().expect("the pending lock").len()
     }
 
