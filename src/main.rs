@@ -120,6 +120,10 @@ async fn start<J: Judge>(judge: J, config: config::Config) -> anyhow::Result<()>
     )
     .await?;
 
+    // Before a claim, so a Server too old to hold this Runner's leases stops it
+    // here rather than after it has taken somebody's submission.
+    run::refuse_a_server_that_cannot_batch(&server).await?;
+
     // **Listening starts after registration**, as it does in the sandboxing
     // Runner: a Runner still waiting to be approved holds nothing, so the
     // default disposition -- which stops the process at once -- is the right

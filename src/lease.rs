@@ -1,38 +1,27 @@
 //! Keeping a job while somebody else's judge thinks about it.
 //!
-//! **Corrected 2026-08-23.** This said `AlgoJudge-Runner` had no equivalent of
-//! it, and that its production loop asks for ten minutes and never renews. Both
-//! halves stopped being true on 2026-08-16 and the sentence outlived them:
-//! `crates/aj-runner/src/keeper.rs` holds every claimed job and trial, and
-//! `a_renewed_lease_outlives_the_deadline_it_was_granted` in
-//! `crates/aj-runner/tests/end_to_end.rs` is the same test as this module's —
-//! a problem type no Runner in the stack handles so the job stays queued, the
-//! shortest lease the Server grants, and a wait past the reaper's sweep.
+//! **Why this Runner needs it at all.** A local evaluation finishes inside a
+//! lease. This one waits up to fifteen minutes on a judging system it does not
+//! control, so a job left on a lease it never extends is reclaimed by the
+//! Server, handed to the next Runner, and **submitted to somebody else's
+//! service a second time**. That is the failure this module exists for.
 //!
-//! **What is still this module's own is why it needs one.** A local evaluation
-//! finishes inside a lease. This Runner waits up to fifteen minutes on a judging
-//! system it does not control, so a job left on a lease it never extends is
-//! reclaimed by the Server, handed to the next Runner, and **submitted to
-//! somebody else's service a second time**. That is the failure this module
-//! exists for.
+//! **Renewal runs on a timer of its own**, a quarter of the lease the Server
+//! granted, which is what `crates/aj-runner/src/keeper.rs` does in the
+//! sandboxing Runner. It used to ride the judge-polling cycle, and that coupled
+//! two things that have nothing to do with each other: being polite to somebody
+//! else's service by polling it less often also stretched the interval at which
+//! this Runner told the Server it was alive.
 //!
-//! **And one difference is worth copying back.** That keeper renews on a timer
-//! of its own — a quarter of the lease the Server actually *granted*. This
-//! module renews at the top of the judge-polling cycle, computed from the
-//! lease it *asked for*. Riding the poll cycle is why
-//! `Config::refuse_what_cannot_work` needs its four-times rule at all: raising
-//! `AJ_External__PollMaxSeconds` to be polite to somebody else's service
-//! stretches renewal with it.
-//! Reading the granted lease is the sturdier half, and the two really could
-//! differ until 2026-08-23, when the Server stopped replacing a claimed lease
-//! with its own default on the first progress report.
+//! **The whole pool is renewed in one request**, `renew_many`, and the answer
+//! speaks per job. Deciding per job is not optional: the give-up budget is
+//! counted on the entry, so one shared counter would spend a whole pool's worth
+//! of budget on one blip.
 //!
-//! The policy is deliberately dull: **renew every held job on every poll cycle,
-//! unconditionally.** Renewal never shortens a lease — the Server's conformance
-//! suite pins that — so there is no deadline arithmetic to get wrong, and no
-//! second opinion about when a lease expires. The cycle is at most sixty seconds
-//! against a lease of twenty minutes, which leaves nineteen failed renewals of
-//! slack before anything is at risk.
+//! The policy is otherwise deliberately dull: **renew every held job on every
+//! cycle, unconditionally.** Renewal never shortens a lease — the Server's
+//! conformance suite pins that — so there is no deadline arithmetic to get
+//! wrong, and no second opinion about when a lease expires.
 //!
 //! Nothing here names a judging system: the lease is between this Runner and the
 //! Server, and what it is being held *for* is the integration's business.
@@ -58,6 +47,18 @@ impl Standing {
             Self::Lost
         } else {
             Self::Unreachable
+        }
+    }
+
+    /// The same reading, of one item in a batch answer.
+    ///
+    /// **Every code means the job is not ours any more** — reaped, another
+    /// Runner's, no longer running, or gone — and the answer for all four is to
+    /// stop holding it without reporting. An absent code is a renewal.
+    pub fn of_code(code: Option<&str>) -> Self {
+        match code {
+            None => Self::Held,
+            Some(_) => Self::Lost,
         }
     }
 }
@@ -116,6 +117,15 @@ pub fn act(standing: Standing, consecutive: u32, ceiling: u32) -> Action {
 pub fn ceiling(lease_seconds: u32, cycle_seconds: u64) -> u32 {
     let cycle = cycle_seconds.max(1);
     ((u64::from(lease_seconds) / cycle).saturating_sub(1)).max(1) as u32
+}
+
+/// How long to wait between renewals: a quarter of the lease that was granted.
+///
+/// The same rule as `keeper::every` in the sandboxing Runner. A quarter leaves
+/// three failures of slack, and the floor stops a Server that grants the
+/// minimum lease from being asked four times a minute.
+pub fn interval(granted: std::time::Duration) -> std::time::Duration {
+    (granted / 4).max(std::time::Duration::from_secs(5))
 }
 
 #[cfg(test)]
