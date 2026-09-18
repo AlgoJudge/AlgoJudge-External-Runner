@@ -283,21 +283,6 @@ installation adds the `external-runner` profile when it wants one, and
 Two things outside this repository decide whether it is ever handed work —
 external judging being on for the installation, and an administrator approving
 this Runner — and neither is a release step.
-### A tag is not a release
-
-`release.yml` holds `contents: read`. It **creates no GitHub Release and writes
-no release notes** — nothing in CI does, and **nothing goes red when a Release
-is missing**. A tag with no Release looks exactly like a tag with one, from
-every angle except the releases page.
-
-It is therefore a step somebody takes by hand, and the evidence that it gets
-missed is `AlgoJudge-Docs`: it carried `v0.1.0` with no Release beside it until
-that was found on 2026-09-18, eleven days later.
-
-- [ ] `gh release list -R AlgoJudge/AlgoJudge-External-Runner` names the tag just pushed.
-
-The note's shape is `/release` in the workspace, `reference/release-notes.md`.
-
 ### The public website states this component's version
 
 `algojudge.pl` prints **`External-Runner v0.1.0`** in four places — a card badge and
