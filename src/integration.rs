@@ -68,7 +68,7 @@ pub enum Chosen {
     NotSubmittable(String),
 }
 
-/// What the Runner does with an answer it recognised.
+/// What the Runner does with an answer it recognized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The judge decided. `verdict` is stored verbatim; `solved` decides the
@@ -76,7 +76,7 @@ pub enum Outcome {
     Judged {
         /// The canonical long name, for the column filters and rankings key on.
         verdict: &'static str,
-        /// The short name a user of that judge recognises, for the result screen.
+        /// The short name a user of that judge recognizes, for the result screen.
         abbreviation: &'static str,
     },
     /// Not judged yet. Keep waiting; this is not an answer.
@@ -132,7 +132,7 @@ impl std::fmt::Display for Refused {
 /// them. So the distinction travels in the sentence.
 ///
 /// **A sentence and not a field**, deliberately: `ReportResult` has no member
-/// for it, and inventing a wire flag for one Runner's judgement about somebody
+/// for it, and inventing a wire flag for one Runner's judgment about somebody
 /// else's archive would be a Server change made for a problem type — which is
 /// the one thing this product's architecture refuses. `FailureReason` is an
 /// unbounded text column, so the room is there.
@@ -162,7 +162,7 @@ pub const POLICY_VIOLATION: &str = "PolicyViolation";
 /// contest counts only `AC`, while a course may reasonably accept a correct
 /// answer with sloppy whitespace. Expressed as a list rather than as a fraction,
 /// so the score stays binary and every number in it comes from a rule somebody
-/// wrote down rather than from a judgement we invented about somebody else's
+/// wrote down rather than from a judgment we invented about somebody else's
 /// verdict.
 pub fn solved(abbreviation: &str, accepted: &[String]) -> bool {
     accepted
@@ -176,7 +176,7 @@ pub fn solved(abbreviation: &str, accepted: &[String]) -> bool {
 ///
 /// **Not the judge's half.** Which problem this is belongs to whichever judge
 /// holds it, and is read by the implementation; how a course counts the answer
-/// is the product's, is spelt the same for every judge, and is read here.
+/// is the product's, is spelled the same for every judge, and is read here.
 #[derive(Debug, Deserialize)]
 struct Judging {
     scoring: Option<Scoring>,
@@ -352,7 +352,7 @@ pub trait Judge: Send + Sync {
     /// Refused here as well as in the Client, because a rule only the Client
     /// applies is a rule a devtools console turns off.
     ///
-    /// **Against the judge's own catalogue**, not against something the problem
+    /// **Against the judge's own catalog**, not against something the problem
     /// carried: a judge offers what it offers, which is the same list for every
     /// problem it holds.
     fn language(&self, setup: &Setup, wanted: Option<&str>) -> Chosen {

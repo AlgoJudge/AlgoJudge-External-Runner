@@ -70,7 +70,7 @@ pub fn declared<J: Judge>(config: &Config, judge: &J) -> Vec<String> {
 /// The longer of this Runner's own backoff and what the Server asked for.
 ///
 /// Advice, not an instruction, and the arithmetic says which: an operator's
-/// `Retry-After: 300` is honoured because it is longer, and a proxy's
+/// `Retry-After: 300` is honored because it is longer, and a proxy's
 /// `Retry-After: 0` cannot turn a retry into a spin because it is not.
 fn how_long(e: &aj_protocol::Error, backoff: &mut Backoff) -> Duration {
     let mine = backoff.next_delay();
@@ -367,7 +367,7 @@ impl<J: Judge> Runner<J> {
             // **Raced against the stop, which it was not until 2026-09-04.**
             // The check above happens before a call the Server may hold open
             // for the whole of `poll_wait`, so a stop arriving during the
-            // hold cancelled nothing: the process sat there uninterruptible
+            // hold canceled nothing: the process sat there uninterruptible
             // while its grace ran out, and everything it had already
             // forwarded to the judge stayed leased for the full lease
             // instead of being handed back.
@@ -545,7 +545,7 @@ impl<J: Judge> Runner<J> {
     ///
     /// A quarter of the granted lease, which leaves three failures of slack —
     /// the rule `keeper.rs` uses in the sandboxing Runner. It is deliberately
-    /// unrelated to how often the judge is asked: those are politeness towards
+    /// unrelated to how often the judge is asked: those are politeness toward
     /// somebody else's service, and this is whether the Server still believes
     /// this Runner is alive.
     async fn renewing(&self, stopping: &Stopping) -> anyhow::Result<()> {
@@ -1142,7 +1142,7 @@ impl<J: Judge> Runner<J> {
         }
     }
 
-    /// The two artefacts, **before** the report.
+    /// The two artifacts, **before** the report.
     ///
     /// The order is not a preference: the Server accepts an attachment only
     /// while the job is `Running`, and reporting ends that. Get it the wrong way

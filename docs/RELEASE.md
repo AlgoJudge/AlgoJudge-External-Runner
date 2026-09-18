@@ -123,7 +123,7 @@ start with nothing configured**, and that its two directories exist and belong t
 the source alone.
 
 **The package it creates is private, because this repository is**, and the
-workflow cannot change that. Somebody with access to the organisation's packages
+workflow cannot change that. Somebody with access to the organization's packages
 decides once whether it becomes public; `AlgoJudge-Ops/docs/INSTALL.md` counts it
 among the packages an installation needs and says it is not like the other seven.
 Publishing the image at all is that decision, and it is not made here.
@@ -174,7 +174,7 @@ Publishing the image at all is that decision, and it is not made here.
       `rust:slim` moved to **1.98.0** on 2026-08-28, so the pin is one minor
       behind. **Not moved, and deliberately**: the digest is shared with
       `AlgoJudge-Runner` across six files in two repositories, and a patch
-      release carrying one behavioural fix is the wrong moment to change the
+      release carrying one behavioral fix is the wrong moment to change the
       compiler for both. `gcr.io/distroless/static-debian13:nonroot` was
       uploaded 2026-08-21 and is current.
 - [ ] Somebody has looked for advisories against `Cargo.lock`. **Nothing in this

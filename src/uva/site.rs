@@ -74,7 +74,7 @@ pub fn shows_the_login_form(page: &str) -> bool {
 /// a second row on a third party's account for one participant's one attempt,
 /// and nothing anywhere said so.
 ///
-/// The unit test that pinned the old behaviour said as much and was read as
+/// The unit test that pinned the old behavior said as much and was read as
 /// reassurance: *"while a submission is queued the id is simply absent, which
 /// is the ordinary case"*. The ordinary case was the dangerous one.
 #[derive(Debug, PartialEq, Eq)]
@@ -159,7 +159,7 @@ use std::time::{Duration, Instant};
 ///
 /// **The mutex is the design, not an implementation detail.** Holding it across
 /// a whole submission gives two properties the specification asks for
-/// separately: submits are serialised — at most one new row on the account can
+/// separately: submits are serialized — at most one new row on the account can
 /// be ours, which is what makes crash recovery unambiguous — and a lapsed
 /// session is re-established once by whoever noticed, rather than by every
 /// caller at once, each invalidating the others' cookie.
@@ -214,7 +214,7 @@ impl Site {
     /// "thirty requests and a plausible ban" this module's own header claims to
     /// have been designed against.
     ///
-    /// The fixtures had modelled the difference since they were written and
+    /// The fixtures had modeled the difference since they were written and
     /// nothing read them: the login stand-in answers a page carrying `logout`,
     /// and `SIGNED_OUT` in `tests/archive.rs` is `#mod_loginform`.
     async fn sign_in(&self) -> anyhow::Result<()> {
@@ -291,7 +291,7 @@ impl Site {
         // **Twice, written twice.** This was a loop with a bound of two and a
         // guard inside it that returned on the second pass — so the bound
         // enforced nothing, and a sabotage that raised it to fifteen changed no
-        // behaviour and reddened no test. Straight-line, the rule is where a
+        // behavior and reddened no test. Straight-line, the rule is where a
         // reader looks for it and a third attempt cannot be added by accident.
         match self
             .attempt(&mut turn, problem_number, language_id, source, min_interval)

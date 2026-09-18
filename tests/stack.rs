@@ -1,9 +1,9 @@
 //! A Server to run against, driven the way a person would.
 //!
-//! **This is the thing that was missing.** Four behaviours of this Runner's own
+//! **This is the thing that was missing.** Four behaviors of this Runner's own
 //! loop cannot be reached from `aj-protocol`'s conformance suite — renewal
 //! firing, a lost lease dropped silently, an unreachable archive reported as
-//! infrastructure, and submission staying serialised — and every one of them
+//! infrastructure, and submission staying serialized — and every one of them
 //! needs a Server with a problem on it and somebody who has submitted.
 //!
 //! Everything here is a manager or a participant acting over HTTP: a session and
@@ -357,7 +357,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
 
     step("enrolling");
     admin
-        .post(&format!("/activities/{activity}/enrolment"), json!({}))
+        .post(&format!("/activities/{activity}/enrollment"), json!({}))
         .await;
 
     Ready { activity }
@@ -459,7 +459,7 @@ fn sha256_of(text: &str) -> String {
 /// It proves a Server can be stood up to the point where this Runner would have
 /// something to take: a `uva@1` problem, attached, open, with a submission
 /// waiting. It deliberately does **not** start a Runner, so nothing reaches
-/// `onlinejudge.org` — the four behaviours this harness exists for come next,
+/// `onlinejudge.org` — the four behaviors this harness exists for come next,
 /// and the one that submits for real needs a decision from whoever owns the
 /// account.
 #[tokio::test]

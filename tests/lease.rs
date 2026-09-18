@@ -43,7 +43,7 @@
 //! the test rather than fail it. Copying it would have saved every measurement
 //! above.
 //!
-//! **The behaviour with no output.** A lease being renewed looks exactly like
+//! **The behavior with no output.** A lease being renewed looks exactly like
 //! one that has not expired yet, so the only way to see it is to hold a job past
 //! the deadline the Server granted and then ask the Server whose it is.
 //!
@@ -127,7 +127,7 @@ async fn archive(server: &MockServer, sid: i64) {
         .await;
 }
 
-/// A catalogue that answers, and a submission list that **never settles**.
+/// A catalog that answers, and a submission list that **never settles**.
 ///
 /// Verdict `0` is "in queue", so the Runner keeps the job and keeps waiting —
 /// which is the situation a lease has to survive.

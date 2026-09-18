@@ -8,10 +8,10 @@
 //! - the **version's** `props` says *which problem this is* — the archive's
 //!   number. Identity, and a fact about the problem rather than about one
 //!   activity's use of it, so it is written once at import and every assignment
-//!   inherits it. That half is this file's, because the member is spelt `uva`.
+//!   inherits it. That half is this file's, because the member is spelled `uva`.
 //! - the **assignment's** `config` says *how this course judges it* — which
 //!   verdicts count as solved, and which languages are allowed. That half is
-//!   spelt the same whichever judge holds the problem, so it is read by
+//!   spelled the same whichever judge holds the problem, so it is read by
 //!   `crate::integration::judging` and not here.
 //!
 //! The language map used to be in there too and is not any more: `uva@1` defines

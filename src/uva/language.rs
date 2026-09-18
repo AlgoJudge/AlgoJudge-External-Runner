@@ -31,7 +31,7 @@ use crate::integration::Language;
 /// on 2026-08-16 (sid 31255986). The other five are read off the archive's form
 /// and nobody here has submitted through them; that distinction is recorded in
 /// the README and is the reason this table is small enough to check by hand.
-pub const CATALOGUE: &[Language] = &[
+pub const CATALOG: &[Language] = &[
     Language {
         id: "c89-gcc",
         label: "C89 / ANSI C (GCC 5.3.0)",
@@ -65,12 +65,12 @@ pub const CATALOGUE: &[Language] = &[
 ];
 
 pub fn for_id(id: &str) -> Option<&'static Language> {
-    CATALOGUE.iter().find(|l| l.id == id)
+    CATALOG.iter().find(|l| l.id == id)
 }
 
 /// Every id, for a refusal that says what is on offer.
 pub fn ids() -> Vec<&'static str> {
-    CATALOGUE.iter().map(|l| l.id).collect()
+    CATALOG.iter().map(|l| l.id).collect()
 }
 
 #[cfg(test)]
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_catalogue_is_the_six_the_archive_offers() {
+    fn the_catalog_is_the_six_the_archive_offers() {
         assert_eq!(
             ids(),
             vec![
@@ -102,7 +102,7 @@ mod tests {
     /// compilers, so no number may appear twice.
     #[test]
     fn no_two_languages_post_the_same_value() {
-        let mut numbers: Vec<i64> = CATALOGUE.iter().map(|l| l.number).collect();
+        let mut numbers: Vec<i64> = CATALOG.iter().map(|l| l.number).collect();
         numbers.sort_unstable();
         let before = numbers.len();
         numbers.dedup();
@@ -119,13 +119,13 @@ mod tests {
             let label = for_id(id).unwrap().label;
             assert!(
                 label.contains("5.3.0") || label.contains("3.5.1"),
-                "{id} is labelled {label:?}, which does not say whose compiler it is",
+                "{id} is labeled {label:?}, which does not say whose compiler it is",
             );
         }
     }
 
     #[test]
-    fn a_language_the_archive_does_not_offer_is_not_in_the_catalogue() {
+    fn a_language_the_archive_does_not_offer_is_not_in_the_catalog() {
         assert!(for_id("cpp20-gcc").is_none());
         assert!(for_id("pypy3").is_none());
         assert!(for_id("").is_none());

@@ -91,7 +91,7 @@ async fn archive_naming(server: &MockServer, sids: &[i64]) {
         .await;
 }
 
-/// uHunt, answering the catalogue and one row with `verdict`.
+/// uHunt, answering the catalog and one row with `verdict`.
 ///
 /// `0` is "in queue", which keeps the job outstanding — the state a lease has to
 /// survive, and the one the give-up is decided in.
@@ -503,7 +503,7 @@ async fn run_until_stopped(
 ///
 /// The claim is answered a second after the word arrives, which is the window
 /// that existed at every default: the stop was checked *before* a call the
-/// Server may hold for twenty-five seconds, so it cancelled nothing. Two things
+/// Server may hold for twenty-five seconds, so it canceled nothing. Two things
 /// then went wrong, and this asserts both.
 ///
 /// The job must be **given back** — dropping the request aborts it, and the
@@ -1042,7 +1042,7 @@ async fn a_source_that_is_not_text_is_a_verdict_and_not_a_failure() {
 /// nothing is outstanding and uHunt keeps only its last hundred events.
 ///
 /// Neither shows up here: the stand-in answers the same event whatever position
-/// it is given, so a Runner that never moved the position passes. Modelling it
+/// it is given, so a Runner that never moved the position passes. Modeling it
 /// needs a stand-in that knows when the submission happened. The first was found
 /// by measuring against onlinejudge.org — 64 s to a verdict with the position
 /// taken late, against 20-28 s with no accelerator at all — and both are held by
@@ -1125,7 +1125,7 @@ async fn an_event_about_our_account_is_answered_without_waiting_for_the_interval
 /// per-entry counter was added to stop, reachable again the moment renewal
 /// became one request.
 #[tokio::test]
-async fn a_stale_job_in_a_batch_answer_is_dropped_and_its_neighbour_kept() {
+async fn a_stale_job_in_a_batch_answer_is_dropped_and_its_neighbor_kept() {
     let mock = MockServer::start().await;
     let site = MockServer::start().await;
     let hunt = MockServer::start().await;

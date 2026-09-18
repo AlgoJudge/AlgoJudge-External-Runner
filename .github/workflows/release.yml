@@ -26,7 +26,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  # **Not cancelled.** A run interrupted between two `docker push` calls leaves
+  # **Not canceled.** A run interrupted between two `docker push` calls leaves
   # a version half in the registry, which is worse than a duplicate run.
   cancel-in-progress: false
 
@@ -146,7 +146,7 @@ jobs:
       # Pushed last, after the image has been built and both checks have passed.
       #
       # **The package this creates is private**, because this repository is, and
-      # nothing here can change that: somebody with access to the organisation's
+      # nothing here can change that: somebody with access to the organization's
       # packages sets it to Public once. `AlgoJudge-Ops/docs/INSTALL.md` counts
       # it among the packages an installation needs.
       - name: Push

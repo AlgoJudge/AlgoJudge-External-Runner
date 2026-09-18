@@ -88,7 +88,7 @@ pub const DEFAULT_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Whether the archive's live stream is used when nothing says otherwise.
 ///
-/// **Off, and that is a rule rather than a judgement about this switch.** A key
+/// **Off, and that is a rule rather than a judgment about this switch.** A key
 /// absent from `.env` means `false`: a name ending in `Enabled` is off until
 /// somebody turns it on, and a name ending in `Disabled` would be on until
 /// somebody turns it off. What a file does not say cannot surprise the person
@@ -484,7 +484,7 @@ mod tests {
     /// **One spelling, whoever typed it.** The Server matches pools by equality,
     /// so `Lab-A` here and `lab-a` on an activity would be two pools that read as
     /// one — and the failure is a queue that never drains with nothing on any
-    /// screen to say why. The Server normalises what it is sent as well; doing it
+    /// screen to say why. The Server normalizes what it is sent as well; doing it
     /// here too is what makes the start-up log say what will actually be stored.
     /// **Through `tags()` itself**, not through a copy of what it does. The first
     /// version of this restated the pipeline inline, and would have stayed green
