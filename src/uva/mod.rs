@@ -112,7 +112,7 @@ impl Judge for Uva {
     }
 
     fn languages(&self) -> &'static [Language] {
-        language::CATALOGUE
+        language::CATALOG
     }
 
     fn read(
@@ -125,7 +125,7 @@ impl Judge for Uva {
 
     async fn problem(&self, number: i64) -> anyhow::Result<i64> {
         // **Read and released before the request.** Holding it across the await
-        // would serialise every problem lookup behind the slowest one, and the
+        // would serialize every problem lookup behind the slowest one, and the
         // only cost of not holding it is that two tasks asking for the same
         // unknown number at the same instant both ask uHunt once.
         if let Some(pid) = self.numbers.lock().expect("the number lock").get(&number) {
@@ -282,7 +282,7 @@ mod tests {
     use crate::integration::Chosen;
 
     /// A judge that reaches nothing. Every method exercised below is decided
-    /// from the catalogue and the arguments, so no request is made.
+    /// from the catalog and the arguments, so no request is made.
     fn offline() -> Uva {
         Uva::new(
             Site::new(

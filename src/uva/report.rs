@@ -1,4 +1,4 @@
-//! The two artefacts a finished submission leaves behind.
+//! The two artifacts a finished submission leaves behind.
 //!
 //! **`details` is where the run time lives** — the same place `standard-io` puts
 //! its per-test table, read by the result renderer through the ordinary

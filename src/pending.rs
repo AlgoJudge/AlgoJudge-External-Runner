@@ -44,7 +44,7 @@ pub struct Entry {
     pub accepted: Vec<String>,
     /// What happened to this submission, in the order it happened.
     ///
-    /// Appended to rather than summarised: when the verdict comes from somebody
+    /// Appended to rather than summarized: when the verdict comes from somebody
     /// else's judge, the rows themselves are the only answer to a dispute about
     /// what that judge said.
     pub trail: Vec<String>,

@@ -2,7 +2,7 @@
 //!
 //! **The live archive is never a test dependency.** It is somebody else's
 //! infrastructure, it publishes no rate limit, and a suite that hammered it on
-//! every commit would be exactly the behaviour this Runner is written to avoid.
+//! every commit would be exactly the behavior this Runner is written to avoid.
 //! Everything here runs against a stand-in that answers what the real one
 //! answered on 2026-08-16.
 //!
@@ -238,7 +238,7 @@ async fn a_sign_in_the_archive_refused_never_reaches_a_submission() {
     );
 }
 
-/// Serialisation is a correctness requirement, not politeness: with one submit
+/// Serialization is a correctness requirement, not politeness: with one submit
 /// in flight at a time, at most one new row on the account can be ours.
 #[tokio::test]
 async fn two_submissions_do_not_overlap_and_keep_their_distance() {

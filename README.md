@@ -9,7 +9,7 @@ waits for that system to decide, and reports its verdict back to AlgoJudge. It
 runs no code, has no sandbox, and measures nothing.
 
 **The verdict is somebody else's opinion.** The compilers, the tests, the limits
-and the judgement belong to the judging system, not to the installation that
+and the judgment belong to the judging system, not to the installation that
 shows the result.
 
 ## Documentation
@@ -157,7 +157,7 @@ and runs nothing, so there is one image here and five there.
 off until somebody turns it on; one ending in `Disabled` would be on until
 somebody turns it off. The rule is about the file nobody wrote: a default that
 turns something on is a decision taken on an operator's behalf, and the first
-they hear of it is the behaviour.
+they hear of it is the behavior.
 
 Every variable is `AJ_`-prefixed, the same convention the Server reads.
 `.env.example` lists them all and gives **no** value to either secret; `.env` is
