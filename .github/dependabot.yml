@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      # Pinned to a commit of AlgoJudge-Runner. Moving it changes the protocol
+      # this Runner speaks, so it moves deliberately.
+      - dependency-name: aj-protocol
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # One digest pins the Rust toolchain in six places, here and in
+      # AlgoJudge-Runner, and `x` names the compiler it resolves to.
+      # It moves in all six at once, by hand.
+      - dependency-name: rust
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
