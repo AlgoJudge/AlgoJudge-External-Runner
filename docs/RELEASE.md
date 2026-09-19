@@ -37,7 +37,7 @@ never speak to each other, so there is no runtime version to match: which
 base image digest, below, and that is a compiler rather than a release.
 
 **Move the pin to the commit `AlgoJudge-Runner`'s tag points at**, not to
-whatever `main` is on the day:
+whatever `main` is at the time:
 
 1. `git -C ../AlgoJudge-Runner rev-parse vX.Y.Z^{commit}` — that is the value.
 2. Put it in `Cargo.toml` as `rev`, and say in the comment beside it which tag
@@ -244,7 +244,7 @@ Publishing the image at all is that decision, and it is not made here.
       Two things a reset stack needs and a running one does not.
       **`docker compose up -d` rather than `start`**: after `down -v` there is
       no container to start, and `start` says so in a way that is easy to read
-      as success. **And the Runner needs approving again** — `down -v` takes the
+      as success. **And the Runner needs approval again** — `down -v` takes the
       identity volume with it, so it registers under a new key and waits. The
       suites approve every Runner they find; nobody approves this one.
 

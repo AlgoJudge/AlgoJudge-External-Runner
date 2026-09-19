@@ -52,7 +52,7 @@ impl Standing {
 
     /// The same reading, of one item in a batch answer.
     ///
-    /// **Every code means the job is not ours any more** — reaped, another
+    /// **Every code means the job is not ours anymore** — reaped, another
     /// Runner's, no longer running, or gone — and the answer for all four is to
     /// stop holding it without reporting. An absent code is a renewal.
     pub fn of_code(code: Option<&str>) -> Self {
@@ -66,7 +66,7 @@ impl Standing {
 /// What to do about a held submission after a renewal attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Carry on waiting for the judge.
+    /// Keep waiting for the judge.
     KeepWaiting,
     /// Forget it **without reporting anything**.
     ///

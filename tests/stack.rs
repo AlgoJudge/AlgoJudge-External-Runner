@@ -80,7 +80,7 @@ pub fn heartbeat() {
     });
 }
 
-/// Sends, and refuses to wait for ever.
+/// Sends, and refuses to wait forever.
 ///
 /// **`reqwest`'s own three deadlines have never fired on the stall** — not
 /// `timeout`, not `read_timeout`, not `connect_timeout` — so this asks tokio
@@ -300,7 +300,7 @@ pub async fn a_problem_to_submit_to(admin: &Session, problem_number: i64) -> Rea
                 // assignment's layer is left. Without it the Runner refuses the
                 // job before anything leaves and says which field is missing.
                 //
-                // **No language map any more**: `uva@1` defines the archive's
+                // **No language map anymore**: `uva@1` defines the archive's
                 // six itself, because the list belongs to the archive and every
                 // problem in it shares them.
                 "props": {

@@ -192,7 +192,7 @@ async fn a_lapsed_session_is_re_established_once_and_not_fifteen_times() {
 /// onlinejudge.org answers a wrong password with 200 and the login page again.
 /// Until 2026-08-31 `sign_in` checked only the status, so that answer set
 /// `signed_in = true` and every job cost two sign-ins and two submissions to
-/// somebody else's account — for ever, under `restart: unless-stopped`, and
+/// somebody else's account — forever, under `restart: unless-stopped`, and
 /// reported as a lapsed session so that nothing ever said the password was
 /// wrong.
 ///

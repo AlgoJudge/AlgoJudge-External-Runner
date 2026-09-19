@@ -122,7 +122,7 @@ service**, so it needs a robot account and a decision from whoever owns it.
 ## The account
 
 Every submission is made under one robot account, and **every real submission
-stays on that account for ever**. That is a decision for whoever owns it.
+stays on that account forever**. That is a decision for whoever owns it.
 
 When testing, use a solution written to be wrong: it keeps the account's solved
 count honest, and it avoids the question of what a duplicated *accepted*

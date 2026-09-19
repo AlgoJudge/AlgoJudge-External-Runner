@@ -2,8 +2,8 @@
 //!
 //! **The line worth caring about runs between two rows.** `SubmissionError` and
 //! `CannotBeJudged` are the external judge failing to form an opinion — not the
-//! participant being wrong. Reporting either as a wrong answer marks somebody
-//! down for our infrastructure, so they leave here as an infrastructure failure
+//! participant being wrong. Reporting either as a wrong answer penalizes somebody
+//! for our infrastructure, so they leave here as an infrastructure failure
 //! and the Server refuses to score one.
 //!
 //! The distinction itself is not UVa's — every external judge has a way of

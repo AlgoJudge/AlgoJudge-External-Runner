@@ -14,7 +14,7 @@
 //!   spelled the same whichever judge holds the problem, so it is read by
 //!   `crate::integration::judging` and not here.
 //!
-//! The language map used to be in there too and is not any more: `uva@1` defines
+//! The language map used to be in there too and is not anymore: `uva@1` defines
 //! its own six, in `language.rs`. See that file for why holding them per problem
 //! was the wrong place.
 
