@@ -209,7 +209,7 @@ impl Site {
     /// login page again, so the status said only that a web server answered —
     /// and the caller set `signed_in = true` on it. A wrong password therefore
     /// produced a submission POST that landed back on the login form, a retry,
-    /// a second sign-in and a second submission, for **every job, for ever**,
+    /// a second sign-in and a second submission, for **every job, forever**,
     /// reported as a lapsed session and never as a credential. That is the
     /// "thirty requests and a plausible ban" this module's own header claims to
     /// have been designed against.
@@ -254,7 +254,7 @@ impl Site {
         // absence is unambiguous and carries the defect; the word is a string on
         // somebody else's page, so requiring it means this Runner stops working
         // the day onlinejudge.org retitles that link — and no fixture here can
-        // predict that day. The trade was taken with that known: a session
+        // predict that day. The trade was made with that known: a session
         // wrongly believed in costs submissions to a third party's account, and
         // refusing to start is the cheaper failure of the two.
         if !page.to_ascii_lowercase().contains("logout") {

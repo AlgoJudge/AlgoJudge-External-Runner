@@ -30,7 +30,7 @@ impl Row {
     /// Reads a row, or nothing.
     ///
     /// A short row is skipped rather than failing the poll: one malformed entry
-    /// in a window of somebody else's submissions must not stop us reporting the
+    /// in a window of somebody else's submissions must not stop us from reporting the
     /// verdicts that did arrive.
     fn read(value: &serde_json::Value) -> Option<Self> {
         let cells = value.as_array()?;

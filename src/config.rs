@@ -765,7 +765,7 @@ mod tests {
         config.poll_wait = SERVER_MAX_WAIT_SECONDS;
         config
             .refuse_what_cannot_work()
-            .expect("polling slowly is not a lease problem any more");
+            .expect("polling slowly is not a lease problem anymore");
 
         // And the other direction: a short lease with a long poll.
         config.lease_seconds = 240;

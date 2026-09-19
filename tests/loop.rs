@@ -75,7 +75,7 @@ async fn archive_naming(server: &MockServer, sids: &[i64]) {
                     .as_str(),
                 ),
             );
-        // The last one answers for ever, so a submission this test did not plan
+        // The last one answers forever, so a submission this test did not plan
         // for still gets an answer rather than a match failure.
         if nth + 1 < sids.len() {
             mounting.up_to_n_times(1).mount(server).await;
@@ -716,7 +716,7 @@ async fn a_job_given_up_on_is_reported_and_not_dropped() {
             r#"{"languages":[]}"#,
             r#"{"uva":{"problemNumber":100}}"#,
         ),
-        // Unreachable, for ever.
+        // Unreachable, forever.
         ResponseTemplate::new(503),
     )
     .await;
@@ -972,7 +972,7 @@ async fn told_to_stop_it_hands_back_every_job_it_is_holding() {
 ///
 /// Reading it with `read_to_string` made a file in any other encoding an
 /// infrastructure failure — which is rejudgeable, so every rejudge repeated it
-/// against a file that will never change, for ever. What leaves this
+/// against a file that will never change, forever. What leaves this
 /// installation is the bytes of a form field, so a file that cannot be decoded
 /// is one the judge could never have been given: a verdict, and a final one.
 #[tokio::test]
@@ -1007,7 +1007,7 @@ async fn a_source_that_is_not_text_is_a_verdict_and_not_a_failure() {
     assert_eq!(reports.len(), 1, "the job was not answered at all");
     assert!(
         !reports[0].contains("\"infrastructureFailure\":true"),
-        "a file that will never decode was reported as our failure, so a rejudge          repeats it for ever: {}",
+        "a file that will never decode was reported as our failure, so a rejudge          repeats it forever: {}",
         reports[0]
     );
     assert!(

@@ -857,7 +857,7 @@ impl<J: Judge> Runner<J> {
         // What leaves this installation is the bytes of a form field, so a file
         // this cannot decode is one the judge could never have been given —
         // and calling that an infrastructure failure made it rejudgeable, which
-        // meant every rejudge repeated it for ever against a file that will
+        // meant every rejudge repeated it forever against a file that will
         // never change.
         let bytes = std::fs::read(held.path()).map_err(|e| Blocked::Failure(e.to_string()))?;
         let source = String::from_utf8(bytes)
@@ -1146,7 +1146,7 @@ impl<J: Judge> Runner<J> {
     ///
     /// The order is not a preference: the Server accepts an attachment only
     /// while the job is `Running`, and reporting ends that. Get it the wrong way
-    /// round and the log explaining a failure is the thing that goes missing.
+    /// around and the log explaining a failure is the thing that goes missing.
     ///
     /// A lost attachment is a warning, never a failure: an answer without its
     /// evidence is worth more than no answer at all.

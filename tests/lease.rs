@@ -5,7 +5,7 @@
 //! Measured 2026-08-22 against a live development stack. Two faults were in the
 //! test itself and are fixed; a third is in the Server and is not.
 //!
-//! **It used to hang for ever, and that was a deadlock written into it.**
+//! **It used to hang forever, and that was a deadlock written into it.**
 //! `run::admitted` does not return until a manager approves the Runner, and the
 //! approval was on the next line. Everything that looked like a network fault —
 //! a socket idle with both queues empty, no deadline firing, every thread asleep
@@ -164,7 +164,7 @@ async fn uhunt_still_thinking(server: &MockServer, sid: i64, pid: i64) {
 /// to run this in three minutes.
 ///
 /// The Server grants what is asked for, clamped to `[60, 3600]` — sixty is the
-/// **floor**, not the ceiling, which this file claimed the other way round until
+/// **floor**, not the ceiling, which this file claimed the other way around until
 /// it was read. So under a configuration that passes validation the Runner
 /// always gives up on the archive before the lease it holds could expire, and
 /// renewal never has to save anything.

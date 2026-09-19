@@ -78,7 +78,7 @@ COPY --from=build --chown=65532:65532 /state/cache /var/cache/algojudge-external
 # every job, through the protocol crate's cache and with its checksum verified —
 # and it needs somewhere to live. Both paths are stated here rather than left to
 # agree with a constant in the binary, which is how the second one came to be
-# absent from the image for a fortnight.
+# absent from the image for two weeks.
 ENV AJ_Runner__KeyPath=/var/lib/algojudge-external-runner/identity.key \
     AJ_Cache__Path=/var/cache/algojudge-external-runner
 
