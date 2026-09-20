@@ -13,12 +13,13 @@ dependencies = [
 
 [[package]]
 name = "aj-protocol"
-version = "0.1.0"
-source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=9f25532c7401fc089db66b845cfc9a46fc8faf4e#9f25532c7401fc089db66b845cfc9a46fc8faf4e"
+version = "0.2.0"
+source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=640cfba6c24ee477d9e2a6cdb2ea0b954e4cd862#640cfba6c24ee477d9e2a6cdb2ea0b954e4cd862"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
  "hex",
+ "libc",
  "rand_core 0.6.4",
  "reqwest",
  "serde",
@@ -31,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "algojudge-external-runner"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aj-protocol",
  "anyhow",
@@ -253,7 +254,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.5",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1405,9 +1406,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.44"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
