@@ -140,11 +140,11 @@ is what lets one `.env` serve both.
 Pushing a `v*` tag publishes one image to GitHub's container registry:
 
 ```bash
-docker pull ghcr.io/algojudge/algojudge-external-runner:0.1.1
+docker pull ghcr.io/algojudge/algojudge-external-runner:0.2.0
 ```
 
-`0.1.0`, `0.1`, `0` and `latest` point at the same image; **a prerelease
-(`v0.1.0-rc.1`) publishes only its own tag**, so nothing moving ever points at a
+`0.2.0`, `0.2`, `0` and `latest` point at the same image; **a prerelease
+(`v0.2.0-rc.1`) publishes only its own tag**, so nothing moving ever points at a
 release candidate. `linux/amd64` only.
 
 **No language images**, unlike the sandboxing Runner: this one compiles nothing

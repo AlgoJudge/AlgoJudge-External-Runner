@@ -56,40 +56,42 @@ range widened over there arrives here with the pin.
 
     git -C ../AlgoJudge-Runner diff <old-rev>..vX.Y.Z -- crates/aj-protocol Cargo.toml
 
-**Where it stands on 2026-09-07.** The pin is `490d2e26038dccaf1228178b45205d78452a2cd9`,
-an ancestor of `AlgoJudge-Runner`'s `release/0.1.0` (`77a20fd`). The
-`crates/aj-protocol` tree is identical at the pin, at that branch and at `main`
-— all three are `06b253380d6f712ebd3f8eaba9e15caee5a000e7` — and the only
-change to that workspace manifest since the pin adds `libc`, which
-`aj-protocol` does not use. So moving the pin onto the 0.1.0 commit compiles to
-the same bytes. Do it anyway: what it buys is a lockfile that names the release
-this was built against rather than a commit in the middle of one.
+**Where it stands.** The pin is `640cfba6c24ee477d9e2a6cdb2ea0b954e4cd862`,
+which is `AlgoJudge-Runner`'s `v0.2.0`.
 
-## The two Runners repeat each other, and the copy has drifted
+**The move is not a formality, and the size of the diff is not the measure of
+it.** Between 0.1.0 and 0.2.0 the crate gained a cache several Runners share —
+an entry is a directory under `packages/` holding the bytes and everything built
+from them, behind a `flock`, which is what brought `libc` in. None of it reaches
+this Runner's calls: `Cache::new`, `Cache::sweep`, `Cache::fetch`,
+`Entry::path` and every `Server` method keep their signatures, and
+`Server::download_verified` is an addition. **Prove that with a build rather
+than with a reading**, because the reading is what a widened range slips past.
+
+**An entry written under the older layout is reclaimed, not collided with.**
+Those bytes sit at `<root>/xx/yy/zz/<fileId>`; an entry now lives under
+`<root>/packages/`, which the older code never wrote to, and `Cache::sweep` —
+called at start in `src/main.rs` — removes them. An upgrade re-downloads what it
+had cached, which is what a cache is for.
+
+## The two Runners repeat each other
 
 Registration, approval, claiming, the lease, reporting, uploads, the long-poll
 wait, the cache, backoff and shutdown exist twice — once in
 `crates/aj-runner/src/run.rs` over there and once in `src/run.rs` here. The
-shared *client* is `aj-protocol` and cannot drift; the loops around it can, and
-have.
+shared *client* is `aj-protocol` and cannot drift; the loops around it can.
 
 **Read the two side by side before every release** and settle each difference
-as deliberate or as arrears. What follows was checked on 2026-09-07 against
-`AlgoJudge-Runner` at `release/0.1.0`.
-
-### What the sandboxing Runner has and this does not
-
-None of these is a release blocker. All of them are arrears.
-
-| | |
-|---|---|
-| `Retry-After` | `Error::retry_after()` is called nowhere here. Over there every wait goes through `how_long` (`crates/aj-runner/src/run.rs:147`), which takes the Server's number where it asks for longer than the local backoff. An operator asking for five minutes gets thirty seconds here |
-| Maintenance windows | `Server::health()`, `Error::unavailable()` as a state of its own and `Error::in_maintenance()` are unused here. `wait_out` (`crates/aj-runner/src/run.rs:167`) reads `/health`, logs the operator's own words, and returns the moment the window ends. Here `unavailable()` is folded into `retryable()` (`src/run.rs:110`, `src/run.rs:132`) and in the claim loop reaches the catch-all `warn!` at `src/run.rs:322` |
-| A revoked key | `Error::revoked()` is unused here, so a revocation exits with "the Server refused the registration" (`src/run.rs:117`) instead of saying the key is dead and a new registration is needed |
-| The registration fingerprint | `Registered.fingerprint` is never compared with `Identity::fingerprint()` here. That comparison is what catches a public key re-encoded in transit, whose only other symptom is every later signature failing with nothing to explain it |
-| The report retry | `send` (`src/run.rs:802`) is ten attempts backing off 2 s to 30 s, on **any** error including one that will never succeed. `report_with_retries` over there stops on `!e.retryable()` and bounds the whole retry by the lease it actually holds. At the shipped `AJ_Lease__RequestSeconds=1200` this gives up about five minutes into a twenty-minute lease |
-| A tunable Server backoff | `AJ_Poll__MinSeconds` and `AJ_Poll__MaxSeconds` exist over there. Here the admission backoff is 2–60 s (`src/run.rs:73`) and the claim backoff 1–30 s (`src/run.rs:186`), both literals |
-| What a landed report said | `ReportAccepted` is discarded here (`src/run.rs:806`). The other Runner logs `result_id`, `state` and `duplicate`, which is how a duplicate report is told from a first one |
+as deliberate or as arrears. **Nothing is outstanding**: every wait goes through
+`how_long`, which prefers the Server's `Retry-After` to the local backoff; a
+maintenance window is waited out through `wait_out` against `/health` rather
+than folded into a generic retry; a revoked key is named as a dead key;
+`Registered.fingerprint` is compared with `Identity::fingerprint()`, which is
+what catches a public key re-encoded in transit; the report retry is bounded by
+the lease rather than by a count, and stops on an error that will never succeed;
+`AJ_Poll__MinSeconds` and `AJ_Poll__MaxSeconds` are read rather than written as
+literals; and `ReportAccepted.duplicate` is read, which is how a duplicate
+report is told from a first one.
 
 ### What this does differently on purpose
 
@@ -98,44 +100,60 @@ Leave these alone.
 - `external: true` and `machine: None` at registration. It measures nothing, and
   the Server pairs work with workers on that flag by equality.
 - No trials. `claim_trial` and `report_trial` are never called.
-- A pool of up to `AJ_External__MaxPending` jobs, renewed together in
-  `renew_everything` on the judge's own polling cycle — against one job and a
-  background `Keeper` task over there. A held lease is renewed once per cycle,
-  which is why `AJ_External__PollMaxSeconds` plus `AJ_Poll__WaitSeconds` must
-  fit four times inside it (`src/config.rs:354`).
+- A pool of up to `AJ_External__MaxPending` jobs rather than one, claimed and
+  released in batches, and every one of them given back on `SIGTERM`.
+- **Renewal on a cadence of its own** — a quarter of the granted lease, the rule
+  `keeper.rs` uses over there — and deliberately unrelated to how often the
+  judge is polled. Those two are politeness toward somebody else's service; this
+  is whether the Server still believes this Runner is alive. Coupling them back
+  together fails `a_slow_poll_interval_no_longer_touches_the_lease`.
 - `progress` after a forward, which the sandboxing Runner never calls: this one
   then waits on somebody else's service for up to fifteen minutes.
 - A constant 60 s heartbeat rather than `AJ_Heartbeat__Seconds`. One process
   against one judge has no fleet to tune.
-- Every held job is released on `SIGTERM`, not one.
+- **A submission's source goes through the cache here and through nothing
+  there.** The sandboxing Runner caches packages, which many submissions share,
+  and takes a submission's own file with `Server::download_verified`, which
+  keeps nothing. An external problem has no package — its whole configuration
+  travels on the job — so here the cache holds sources, and that is what
+  `AJ_Cache__MaxBytes` is sized for.
 
 ## What a tag does
 
 `.github/workflows/release.yml` runs on a pushed tag matching `v*`, refuses one
 that does not point at a commit on `main`, refuses a name that is not
 `v<major>.<minor>.<patch>[-prerelease]`, and publishes one image —
-`ghcr.io/algojudge/algojudge-external-runner` — under `0.1.0`, `0.1`, `0` and
-`latest`. A prerelease publishes its own tag alone. `linux/amd64` only.
+`ghcr.io/algojudge/algojudge-external-runner` — under `<major>.<minor>.<patch>`,
+`<major>.<minor>`, `<major>` and `latest`. A prerelease publishes its own tag
+alone and moves none of the others. `linux/amd64` only.
 
 Before pushing it checks two things about the image itself: that it **refuses to
 start with nothing configured**, and that its two directories exist and belong to
 `nonroot`. Both are properties an operator depends on and neither is visible from
 the source alone.
 
-**The package it creates is private, because this repository is**, and the
-workflow cannot change that. Somebody with access to the organization's packages
-decides once whether it becomes public; `AlgoJudge-Ops/docs/INSTALL.md` counts it
-among the packages an installation needs and says it is not like the other seven.
-Publishing the image at all is that decision, and it is not made here.
+**The package is public**, and an installation can pull it without
+authenticating. That is a one-time decision somebody with access to the
+organization's packages made, not something the workflow sets: a package created
+by a first push is private whatever the repository is, and no token here can
+change it. It matters only when a release publishes an image name that did not
+exist before. Read it back rather than assuming, and anonymously — `gh api
+.../packages` needs a `read:packages` scope the release token does not carry:
+
+```sh
+token=$(curl -s "https://ghcr.io/token?scope=repository:algojudge/algojudge-external-runner:pull&service=ghcr.io" \
+  | python -c "import json,sys; print(json.load(sys.stdin)['token'])")
+curl -s -H "Authorization: Bearer $token" \
+  "https://ghcr.io/v2/algojudge/algojudge-external-runner/tags/list"
+```
 
 ## Before the tag
 
 - [ ] **The commit being tagged is on `main`.** `release.yml` refuses a tag that
       is not, and CI runs on `main` and on pull requests into it and nowhere
       else — so a `release/x.y.z` branch has no CI run of its own however green
-      it looks. On 2026-09-07 `release/0.1.0` was two commits ahead of `main`
-      (`4ded646` and `73b68ea`, documentation only), and CI had run on neither. Merge the branch into `main`, let that run go green, and tag
-      the merge.
+      it looks, and a branch carrying nothing but documentation is no exception.
+      Merge the branch into `main`, let that run go green, and tag the merge.
 - [ ] The `aj-protocol` pin names the commit of `AlgoJudge-Runner`'s own
       release. The section above says how, and how to tell.
 - [ ] `Cargo.toml` says the version being released, and `Cargo.lock` agrees.
@@ -170,24 +188,42 @@ Publishing the image at all is that decision, and it is not made here.
       question to ask the registry rather than the file. Record the answer and
       the date whether or not anything moves.
 
-      **Asked on 2026-09-08, for 0.1.1.** The pinned Rust is **1.97.1**;
-      `rust:slim` moved to **1.98.0** on 2026-08-28, so the pin is one minor
-      behind. **Not moved, and deliberately**: the digest is shared with
-      `AlgoJudge-Runner` across six files in two repositories, and a patch
-      release carrying one behavioral fix is the wrong moment to change the
-      compiler for both. `gcr.io/distroless/static-debian13:nonroot` was
-      uploaded 2026-08-21 and is current.
-- [ ] Somebody has looked for advisories against `Cargo.lock`. **Nothing in this
-      repository does it**: there is no `cargo audit` or `cargo deny` step in
-      either workflow, none in `x`, no `deny.toml` and no Dependabot
-      configuration. Until there is, it is a person running
-      `./x install cargo-audit` and `./x audit`, and the date of that run is
-      what a release can claim.
-      `scraper` is the one direct dependency whose requested range sits a full
-      minor behind what exists upstream — `0.20`, against `0.22`.
+      **Asked on 2026-09-20, for 0.2.0.** The pinned Rust is **1.97.1**
+      (`sha256:3b287904…`); `rust:slim` is **1.98.1** and resolves to
+      `sha256:f47a8de2…`, so the pin is one minor and one patch behind.
+      **Not moved, and deliberately**: the digest is shared with
+      `AlgoJudge-Runner` across six files in two repositories, that repository
+      released 0.2.0 on 1.97.1 the same day, and moving it here alone would
+      leave the two compiling against different compilers — the one thing the
+      item above exists to prevent. It moves in all six at once or not at all.
+      `gcr.io/distroless/static-debian13:nonroot` is current.
+- [ ] Somebody has looked for advisories against `Cargo.lock`. **No workflow
+      does it**: there is no `cargo audit` or `cargo deny` step in either
+      workflow, none in `x`, and no `deny.toml`. `.github/dependabot.yml` raises
+      pull requests for cargo, docker and actions on a weekly schedule with a
+      seven-day cooldown — and it ignores `aj-protocol` and `rust` by name,
+      because both are pins that move deliberately — but a Dependabot pull
+      request is an upgrade offer, not an advisory scan: it says nothing about
+      what is already in the lock. **So the date of the last hand-run is the
+      whole of the coverage**, and it is a person running
+      `./x install cargo-audit --locked` and then `./x audit`.
 
-      **Run on 2026-09-08 for 0.1.1**: 245 crate dependencies against 1242
-      advisories, nothing found.
+      **Chain it.** `cargo audit` exits non-zero on a finding, so reading the
+      output is not the check.
+
+      **Run it before the version bump**, and where it finds something, measure
+      the fix before applying it — `./x update --dry-run -p <crate>` says how
+      many packages move. A patch that closes an advisory inside a range
+      `Cargo.toml` already allows is taken during a release; a major that is
+      failing its own checks is not. **Re-run `./x gate` afterwards**: the lock
+      changed, so the earlier green is about other bytes.
+
+      **Run on 2026-09-20 for 0.2.0**: 245 crate dependencies against 1251
+      advisories, **one found** — `RUSTSEC-2026-0285`, published 2026-09-14,
+      TLS 1.3 handshake messages accepted across encryption level boundaries,
+      medium. `rustls` 0.23.44 reaches this Runner through `reqwest`, and it is
+      the TLS it speaks both to the Server and to the judging service. Closed by
+      `0.23.45`, a patch inside the existing range.
 - [ ] `.env.example` has been **read**, not just tested. The suite compares it
       against the source, and the comparison is narrower than it sounds:
       `every_variable_the_config_reads_is_in_the_example_and_no_others` in
@@ -257,21 +293,69 @@ Publishing the image at all is that decision, and it is not made here.
       `docs/README.md` and `docs/UVA.md` included, and the comments in
       `Dockerfile`, `Dockerfile.toolchain`, `example-development-docker-compose.yaml`
       and `x`. The comments in this repository carry dates and measurements, and
-      they age like the code does. **Six things were wrong on 2026-09-07 and are
-      not fixed by this file**: `README.md:202` states the four-times rule
-      against `AJ_External__PollMaxSeconds` alone when the code counts
-      `poll_max + poll_wait`; `README.md`'s list of refusals gives four and the
-      code has eight; `README.md` never names `AJ_Poll__WaitSeconds` at all;
-      `docs/README.md:3` claims the README carries every `AJ_External__*`
-      variable and `LongPollEnabled` is missing from it; the *Two sections*
-      paragraph at `README.md:160` names three prefixes of five;
-      `example-development-docker-compose.yaml:11` counts thirteen unignored
-      tests where there are sixteen.
+      they age like the code does.
+
+      **Counts in prose are what rots first.** A sentence naming how many
+      refusals, variables or tests there are is wrong the moment one is added,
+      and nothing fails when it happens. Prefer the command that answers —
+      `./x test -- --list` rather than a number — and where a count has to be
+      written, recompute it here rather than trusting the sentence.
 - [ ] The two `docs.algojudge.pl` links in `README.md` —
-      `/en/runner/external/` and `/en/install/external-runner/` — have pages
-      behind them in `AlgoJudge-Docs`. **The site has no DNS record yet**, so
-      they resolve to nothing on the day of the release whatever the repository
-      says.
+      `/en/runner/external/` and `/en/install/external-runner/` — answer. The
+      site is published, so this is a request rather than a reading of
+      `AlgoJudge-Docs`:
+
+      ```sh
+      for u in https://docs.algojudge.pl/en/runner/external/ \
+               https://docs.algojudge.pl/en/install/external-runner/; do
+        curl -sL -o /dev/null -w "$u %{http_code}\n" "$u"
+      done
+      ```
+
+## Cutting the tag
+
+The tag is what publishes; nothing that lands on `main` reaches the registry on
+its own. Three things are true before it is cut, and each is read rather than
+assumed:
+
+```sh
+git merge-base --is-ancestor <sha> origin/main              # it is on main
+gh run list -R AlgoJudge/AlgoJudge-External-Runner --commit <sha>  # green
+git tag --list                                              # the name is free
+```
+
+**Its own run.** A later green run on `main` is evidence about a later commit,
+and a release branch has no run at all.
+
+The tag is annotated, and the message names the product:
+
+```sh
+git tag -a v<version> -m "AlgoJudge External Runner <version>" <sha>
+git push origin v<version>
+```
+
+That push starts `.github/workflows/release.yml`, which takes about **1 m 40 s**.
+Watch it — `gh run watch <id>` — rather than assuming it.
+
+**Two things have no undo.** The run is never canceled: `cancel-in-progress` is
+`false` here because a run interrupted between two `docker push` calls leaves a
+version half in the registry. And **deleting a tag unpublishes nothing** — the
+images of a tag deleted from `AlgoJudge-Runner` in August 2026 are still in
+GHCR. The name is checked before the push or not at all.
+
+Then the GitHub Release, which no workflow creates — `release.yml` holds
+`contents: read`:
+
+```sh
+gh release create v<version> -R AlgoJudge/AlgoJudge-External-Runner \
+  --title "<version>" --notes-file <file>
+```
+
+The title is the bare version, no `v`; `--prerelease` when the version carries
+one.
+
+**A release body is not a file in this repository.** GitHub renders a single
+newline as a line break, so each paragraph is written as one long line.
 
 ## After the tag
 
@@ -292,10 +376,16 @@ roadmap item, in each of `src/content/pl.json` and `src/content/en.json` of
 **`AlgoJudge-Website` has no CI.** Its fifteen tests run only when somebody types
 `npm test`, so nothing reports the mismatch.
 
-`AlgoJudge-Website/tests/content.test.mjs:125` pins the version literal by regex,
-`External-Runner v0\.1\.0`, and hard-codes the five repository keys. Correcting the content
-turns that suite red: the test asserts the literal and needs the same edit. Change
-content and test in one commit.
+`AlgoJudge-Website/tests/content.test.mjs` pins the literal in **three** places,
+so correcting the content turns that suite red and the test needs the same edit:
+`:152` asserts the roadmap mentions `0.1.0` at all, `:155` selects the released
+repositories by `badge === "v0.1.0"`, and `:161` loops over five hard-coded
+component names asserting `<Component> v0\.1\.0`.
+
+**The shape is what is wrong, not only the literal.** That loop asserts all five
+components carry one version, and they do not: the five are released
+independently and already sit on three different numbers. A test that cannot
+express that is asserting a world the project left.
 
 The correction is `/website-sync` in the workspace. This runbook's step is to
 record that it is owed.

@@ -1,18 +1,22 @@
 [package]
 name = "algojudge-external-runner"
 description = "A Runner that forwards submissions to external judging systems and reports their verdicts. UVa Online Judge is the integration it has."
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.97"
 license = "MIT"
 repository = "https://github.com/AlgoJudge/AlgoJudge-External-Runner"
 
 [dependencies]
-# The Server–Runner contract, pinned by revision. `AlgoJudge-Runner` publishes no
-# tags, so a revision is the only stable name; and the contract is `Accepted`
-# (v1.1, 2026-08-08) while only one implementation is released, which is why the
-# crate stays where it is rather than being extracted.
-aj-protocol = { git = "https://github.com/AlgoJudge/AlgoJudge-Runner", rev = "9f25532c7401fc089db66b845cfc9a46fc8faf4e" }
+# The Server–Runner contract, `Accepted` as v1.1 on 2026-08-08. It lives in
+# `AlgoJudge-Runner` because that is where both Runners read it from, rather
+# than in a crate of its own.
+#
+# **Pinned by revision, and the revision is a release.** `tag = "v0.2.0"`
+# resolves to the same commit, but a tag can be moved and a revision cannot: the
+# comment carries the name and the `rev` carries the guarantee. This is
+# `AlgoJudge-Runner` v0.2.0.
+aj-protocol = { git = "https://github.com/AlgoJudge/AlgoJudge-Runner", rev = "640cfba6c24ee477d9e2a6cdb2ea0b954e4cd862" }
 
 anyhow = "1.0"
 # `cookies` is the one feature this Runner needs that the sandboxing Runner does

@@ -13,12 +13,13 @@ dependencies = [
 
 [[package]]
 name = "aj-protocol"
-version = "0.1.0"
-source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=9f25532c7401fc089db66b845cfc9a46fc8faf4e#9f25532c7401fc089db66b845cfc9a46fc8faf4e"
+version = "0.2.0"
+source = "git+https://github.com/AlgoJudge/AlgoJudge-Runner?rev=640cfba6c24ee477d9e2a6cdb2ea0b954e4cd862#640cfba6c24ee477d9e2a6cdb2ea0b954e4cd862"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
  "hex",
+ "libc",
  "rand_core 0.6.4",
  "reqwest",
  "serde",
@@ -31,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "algojudge-external-runner"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "aj-protocol",
  "anyhow",
